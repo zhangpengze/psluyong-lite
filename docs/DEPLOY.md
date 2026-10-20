@@ -1,11 +1,31 @@
 # 部署手册
 
-## 一、服务端（NAS Docker）
+## 一、服务端（绿联 NAS · UGOS Pro Docker）
+
+> 流程按绿联官方「Docker 应用 → 项目」Compose 部署方式编写
+> （官方教程：support.ugnas.com），与 UGOS Pro 社区成功案例一致。
+> 其他 NAS 思路相同，只是建项目的入口不同。
+
+### 0. 先配镜像加速（否则首次拉镜像可能卡住）
+
+【Docker】应用 → 【镜像】页 → 右上角【设置】→ 找到 DockerHub 项 →
+「加速器配置」，添加国内源并保存，然后重启 Docker 应用（或重启 NAS）生效：
+
+    https://docker.1ms.run
+    https://docker.xuanyuan.me
+    https://dockerproxy.com
+
+配一个就够，多配几个会自动 fallback。配完随便拉个 nginx 验证速度。
 
 ### 1. 准备目录
 
-在绿联 NAS 的共享文件夹里建一个目录，例如 `/volume1/docker/psluyong-lite`，
-上传整个项目（或只上传 `Dockerfile`、`docker-compose.yml`、`requirements.txt`、`server/`、`bot/`、`core/`）。
+「文件管理」→ 共享文件夹 → 在 `docker` 下新建 `psluyong-lite`
+（完整路径 `/volume1/docker/psluyong-lite`）。上传这些内容：
+
+    Dockerfile  docker-compose.yml  requirements.txt  server/  bot/  core/
+
+只要源码，**不要**把开发机上的 `server/data` 拷进去（见第 4 节）。
+然后准备 `.env`：
 
 ```bash
 cd /volume1/docker/psluyong-lite
@@ -20,14 +40,25 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # API_KEY
 # ADMIN_PASSWORD 自己起一个强密码
 ```
 
-### 2. 启动
+> 绿联文件管理默认隐藏以 `.` 开头的文件，`cp` 之后看不到 `.env` 是正常的：
+> 文件管理 → 设置 → 常规设置 → 取消勾选「隐藏以 . 开头的文件」。
+
+### 2. 启动（项目 Compose，官方推荐方式）
+
+【Docker】应用 → 【项目】→ 【创建】→ 项目目录选
+`/volume1/docker/psluyong-lite` → 粘贴 `docker-compose.yml` 的内容
+（或从本机导入该文件）→「立即部署」，系统会自动构建并启动容器。
+
+习惯命令行的可以开 SSH（控制面板 → 终端 → SSH）后操作：
 
 ```bash
+cd /volume1/docker/psluyong-lite
 docker compose up -d --build
 docker compose logs -f server
 ```
 
-看到 `服务启动 http://0.0.0.0:8080` 即成功。浏览器打开 `http://NAS地址:8080`。
+看到 `服务启动 http://0.0.0.0:8080` 即成功。浏览器打开 `http://NAS的IP:8080`
+（IP 在 控制面板 → 网络设置 → 网络连接 查看）。
 
 ### 3. 资源与备份
 
@@ -35,14 +66,49 @@ docker compose logs -f server
 - 数据全部在 `./server/data`：
   - `app.db` — SQLite 数据库
   - `images/年/月/日/` — 成品图与缩略图
-  - `templates/` — PSD 模板
+  - `backups/` — 每天 03:30 自动热备（gzip，保留最近 10 份）
   - `reports/` — 每日日报 Markdown
-- 备份：直接打包 `server/data` 目录即可，无需导库。
+- 备份验证（在 NAS 上执行，能列出文件说明 Linux 文件锁正常）：
 
-### 4. 反向代理（可选）
+```bash
+docker exec psluyong-lite python -m server.backup --list
+```
+
+- 兜底：直接打包 `server/data` 目录即可，无需导库。
+
+### 4. 从 Windows 开发机迁移数据（可选）
+
+全新部署跳过本节。如果开发机上已有记录和图片要带到 NAS：
+库里 `image_path` / `thumb_path` 存的是**绝对路径**，跨机器拷贝后不会
+自动跟随，需要在 NAS 上做一次路径重写：
+
+1. 停掉两边服务，把整个 `server/data` 目录原样拷到 NAS 的项目目录；
+2. 在 NAS 上执行（SSH 进 NAS 后）：
+
+```bash
+docker exec -i psluyong-lite python - <<'PY'
+import sqlite3
+conn = sqlite3.connect('/app/data/app.db')
+old = 'E:\\psluyong-lite\\server\\data'  # 开发机上的路径前缀，按实际改
+new = '/app/data'
+for col in ('image_path', 'thumb_path'):
+    conn.execute(
+        f"UPDATE records SET {col} = REPLACE(REPLACE({col}, ?, ?), '\\', '/')"
+        f" WHERE {col} LIKE ?",
+        (old, new, old + '%'),
+    )
+conn.commit()
+print('路径重写完成')
+PY
+```
+
+3. 重启容器，在后台抽查几条记录的缩略图和原图能正常打开。
+
+### 5. 反向代理（可选）
 
 用绿联自带反向代理指向 `127.0.0.1:8080`，并加 HTTPS。若启用 HTTPS，
 在 `.env` 里设 `FORCE_HTTPS=1`，否则登录 Cookie 不会带 `Secure` 标记。
+外网访问可用自带的 UGREENlink，不必自己折腾 DDNS。
 
 ---
 
@@ -63,6 +129,10 @@ Rust 外壳会自动拉起 Python sidecar（`python -m client.sidecar.server`）
 set PSLUYONG_PYTHON=C:\path\to\python.exe
 set PSLUYONG_REPO_ROOT=E:\psluyong-lite
 ```
+
+依赖注意：员工机需要 pywin32（COM 调 Photoshop 用），已写在
+`requirements.txt` 里（Windows marker），在员工机执行一次
+`pip install -r requirements.txt` 即可，Linux 上会自动跳过。
 
 ### 打包 sidecar
 
@@ -139,7 +209,10 @@ curl -X POST http://NAS:8080/api/v1/reports/run \
 ## 四、上线检查清单
 
 - [ ] `.env` 里三个密钥都不是示例值
+- [ ] 镜像加速已配（Docker → 镜像 → 设置 → 加速器配置）
+- [ ] 【Docker】→【容器】里 psluyong-lite 状态为「运行中」
 - [ ] 已用管理员登录，改掉默认密码
+- [ ] `docker exec psluyong-lite python -m server.backup --list` 能列出备份
 - [ ] 至少上传 1 个模板，并在客户端成功出过 1 张图
 - [ ] 员工机器的 PS 版本已确认（不同版本 COM 行为略有差异）
 - [ ] `server/data` 已纳入 NAS 定时备份

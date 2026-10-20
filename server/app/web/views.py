@@ -243,10 +243,21 @@ def records():
 @login_required
 def reports():
     """展示最近生成的日报（bot 写入 report 目录）"""
-    from ..config import DATA_DIR
+    import json
+
+    from ..config import DATA_DIR, Config
 
     report_dir = DATA_DIR / "reports"
     files = sorted(report_dir.glob("*.md"), reverse=True)[:30] if report_dir.exists() else []
+
+    # 每条日报的推送状态（bot/report.save_push_status 落盘的同名 JSON）
+    statuses: dict[str, dict] = {}
+    for f in files:
+        status_file = report_dir / f"{f.stem}.status.json"
+        try:
+            statuses[f.stem] = json.loads(status_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass  # 老日报没有状态文件，不显示徽标
 
     selected = request.args.get("file", "")
     content = ""
@@ -265,4 +276,6 @@ def reports():
         files=[f.name for f in files],
         selected=selected,
         content=content,
+        statuses=statuses,
+        report_schedule="%02d:%02d" % (Config.DAILY_REPORT_HOUR, Config.DAILY_REPORT_MINUTE),
     )

@@ -8,6 +8,9 @@
     <h1>每日日报</h1>
     <div class="sub">每天定时生成并推送到 QQ 群 · 这里可回看历史</div>
   </div>
+  {% if me and me.is_admin and selected %}
+    <button class="btn" id="repush-btn" onclick="repushReport()">重推此日报</button>
+  {% endif %}
 </div>
 
 <div class="grid" style="grid-template-columns: 220px 1fr">
@@ -16,9 +19,16 @@
     {% if files %}
       <div style="display:flex;flex-direction:column;gap:4px">
         {% for f in files %}
+          {% set st = statuses.get(f[:-3]) %}
           <a href="{{ url_for('web.reports', file=f) }}"
              style="padding:7px 10px;border-radius:7px;font-size:13px;{{ 'background:#eff4ff;font-weight:600' if f == selected else 'color:#33415c' }}">
             {{ f }}
+            {% if st %}
+              <span style="float:right;font-size:11px;padding:1px 7px;border-radius:8px;line-height:1.6;
+                {{ 'background:#e8f7ee;color:#137a3f' if st.pushed else 'background:#fdecea;color:#b42318' }}">
+                {{ '已推送' if st.pushed else '未推送' }}
+              </span>
+            {% endif %}
           </a>
         {% endfor %}
       </div>
@@ -33,9 +43,35 @@
       <pre class="report">{{ content }}</pre>
     {% else %}
       <div class="empty">
-        日报由后端定时任务生成。配置 <code>NAPCAT_WEBHOOK</code> 与 <code>REPORT_GROUP_ID</code> 后每天 {{ '%02d:%02d'|format(18, 0) }} 自动推送。
+        日报由后端定时任务生成。配置 <code>NAPCAT_WEBHOOK</code> 与 <code>REPORT_GROUP_ID</code> 后每天 {{ report_schedule }} 自动推送。
       </div>
     {% endif %}
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function repushReport() {
+  var btn = document.getElementById('repush-btn');
+  btn.disabled = true;
+  btn.textContent = '推送中…';
+  fetch('/api/v1/reports/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({date: '{{ selected[:-3] }}', push: true})
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d.pushed) {
+      alert('推送成功');
+    } else {
+      alert('推送失败：' + (d.message || d.error || '未知错误') + '\n日报已存档，可稍后再推。');
+    }
+    location.reload();
+  }).catch(function (e) {
+    alert('请求失败：' + e);
+    btn.disabled = false;
+    btn.textContent = '重推此日报';
+  });
+}
+</script>
 {% endblock %}

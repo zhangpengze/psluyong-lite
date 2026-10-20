@@ -11,13 +11,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
+
+# 推送重试：NapCat 抖动（重启中/网络抖一下）时当天不丢。
+# 间隔按次递增，测试里可 monkeypatch 成 (0, 0)。
+PUSH_ATTEMPTS = 3
+PUSH_BACKOFF_S = (5, 15)
 
 
 def build_daily_report(app, day: date | None = None) -> str:
@@ -115,7 +123,7 @@ def save_report(app, content: str, day: date) -> Path:
 
 
 def push_to_group(content: str) -> tuple[bool, str]:
-    """推送到 QQ 群。未配置视为"跳过"而非失败。"""
+    """推送到 QQ 群。未配置视为"跳过"而非失败；失败自动重试。"""
     from server.app.config import Config
 
     webhook = Config.NAPCAT_WEBHOOK.rstrip("/")
@@ -137,24 +145,57 @@ def push_to_group(content: str) -> tuple[bool, str]:
         "message": [{"type": "text", "data": {"text": content}}],
     }
 
-    try:
-        resp = requests.post(f"{webhook}/send_group_msg", json=payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            logger.info("日报已推送 QQ 群 %s", Config.REPORT_GROUP_ID)
-            return True, "推送成功"
-        logger.error("推送失败 HTTP %s: %s", resp.status_code, resp.text[:200])
-        return False, f"推送失败 HTTP {resp.status_code}"
-    except requests.RequestException as e:
-        logger.error("推送异常: %s", e)
-        return False, f"推送异常: {e}"
+    last = "未知错误"
+    for attempt in range(1, PUSH_ATTEMPTS + 1):
+        try:
+            resp = requests.post(f"{webhook}/send_group_msg", json=payload, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                logger.info("日报已推送 QQ 群 %s", Config.REPORT_GROUP_ID)
+                return True, "推送成功"
+            last = f"推送失败 HTTP {resp.status_code}"
+            logger.error("第 %d/%d 次推送失败: %s %s", attempt, PUSH_ATTEMPTS, resp.status_code, resp.text[:200])
+        except requests.RequestException as e:
+            last = f"推送异常: {e}"
+            logger.error("第 %d/%d 次推送异常: %s", attempt, PUSH_ATTEMPTS, e)
+        if attempt < PUSH_ATTEMPTS:
+            wait = PUSH_BACKOFF_S[min(attempt - 1, len(PUSH_BACKOFF_S) - 1)]
+            logger.warning("%ds 后重试推送", wait)
+            time.sleep(wait)
+    return False, f"{last}（已重试 {PUSH_ATTEMPTS} 次）"
+
+
+def save_push_status(day: date, status: dict) -> Path:
+    """推送状态落盘到 reports/<日期>.status.json。
+
+    后台日报页据此显示「已推送/未推送」徽标；补推后同一文件被覆盖更新。
+    原子写：读方（网页渲染）永远不会看到半截 JSON。
+    """
+    from server.app.config import DATA_DIR
+
+    status_dir = DATA_DIR / "reports"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    path = status_dir / f"{day:%Y-%m-%d}.status.json"
+    payload = dict(status)
+    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    logger.info("推送状态已记录 %s: pushed=%s", path.name, payload.get("pushed"))
+    return path
 
 
 def run_daily(app, day: date | None = None, push: bool = True) -> dict:
-    """生成 + 存档 + 推送。返回结构化结果供接口/定时任务使用。"""
+    """生成 + 存档 + 推送 + 记录推送状态。返回结构化结果供接口/定时任务使用。"""
     day = day or date.today()
     content = build_daily_report(app, day)
     path = save_report(app, content, day)
     pushed, message = (False, "未推送") if not push else push_to_group(content)
+    save_push_status(day, {
+        "date": day.isoformat(),
+        "pushed": pushed,
+        "message": message,
+        "pushed_at": datetime.now().isoformat(timespec="seconds") if pushed else None,
+    })
     return {"date": day.isoformat(), "path": str(path), "pushed": pushed, "message": message, "content": content}
 
 

@@ -165,44 +165,85 @@ npm run tauri:build
 
 ---
 
-## 三、QQ 群日报
+## 三、QQ 群日报（NapCat）
 
-### 1. 部署 NapCat
+### 1. 部署 NapCat（UGOS Pro 项目 Compose）
 
-在 NAS 上用 Docker 跑 NapCat（或已有 QQ 机器人框架），登录一个 QQ 号，
-开启 HTTP 服务端（默认 3000 端口），记下 token。
+镜像用社区维护的 `mlikiowa/napcat-docker`。端口：3000=OneBot HTTP、
+6099=WebUI。宿主机 3000 容易被其他服务占用，HTTP 映射到 **13000**。
 
-### 2. 配置
+「文件管理」在 docker 共享文件夹下新建 `napcat/`，【Docker】应用 →
+【项目】→【创建】，项目目录选该文件夹，粘贴：
 
-`.env` 里补上：
+```yaml
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    ports:
+      - "13000:3000"   # OneBot HTTP（勿占宿主机 3000）
+      - "6099:6099"    # WebUI 管理界面
+    volumes:
+      - ./QQ:/app/.config/QQ          # QQ 登录态，删了要重扫
+      - ./config:/app/napcat/config   # NapCat 配置（OneBot 开关在这里）
+    environment:
+      - NAPCAT_UID=0
+      - NAPCAT_GID=0
+      - TZ=Asia/Shanghai
+```
+
+拉镜像慢的话先配第一节的镜像加速。
+
+### 2. 登录 QQ 并开启 HTTP 服务端
+
+1. 容器起来后执行 `docker logs napcat`：日志最顶部有 WebUI 的 Token
+   （在登录二维码上方）。浏览器开 `http://NAS的IP:6099`，用这个 Token 进 WebUI。
+2. 手机 QQ 扫码登录。**建议用小号**——电脑端 QQ 会被挤下线。
+3. **关键一步**：WebUI →「网络配置」→ 新建/启用 **HTTP 服务端**，
+   端口 3000，并设一个鉴权 Token。这个 Token 就是下面 `.env` 里的
+   `NAPCAT_TOKEN`——注意它和 WebUI Token 是两套，可以设成不一样。
+4. 把该 QQ 号拉进目标群。
+
+### 3. 对接 psluyong-lite
+
+`.env` 里补上（用 NAS 的局域网 IP——UGOS 的 Docker 项目之间用容器名
+解析不到，别写 `http://napcat:3000`）：
 
 ```bash
-NAPCAT_WEBHOOK=http://napcat:3000    # 与 server 同网络时用容器名
-NAPCAT_TOKEN=你的token
-REPORT_GROUP_ID=123456789            # 目标群号
+NAPCAT_WEBHOOK=http://192.168.x.x:13000   # NAS 的 IP + 第一步映射的端口
+NAPCAT_TOKEN=HTTP 服务端的 Token
+REPORT_GROUP_ID=123456789                 # 目标 QQ 群号
 DAILY_REPORT_HOUR=18
 DAILY_REPORT_MINUTE=0
 ENABLE_SCHEDULER=1
 ```
 
-重启容器。每天 18:00 自动推送，日报同时存档到 `server/data/reports/`，
-后台「每日日报」页可回看。
-
-### 3. 补跑某天
+IP 在 控制面板 → 网络设置 → 网络连接 查看。改完重启容器：
 
 ```bash
-curl -X POST http://NAS:8080/api/v1/reports/run \
-  -H "Cookie: session=..." \
-  -H "Content-Type: application/json" \
-  -d '{"date":"2026-10-19","push":true}'
+docker compose up -d
 ```
 
-或在后台「每日日报」页点开对应日期后手动触发（需管理员账号）。
+### 4. 验证与补推
 
-### 未配置时
+1. 管理员登录后台 →「每日日报」页。每条日报左侧有推送徽标：
+   **已推送**（绿）/ **未推送**（红）。
+2. 选中任意一天，点右上角「**重推此日报**」立即补推，徽标实时更新——
+   联调 NapCat 就用这个按钮，不用敲命令。
+3. 定时任务每天 `DAILY_REPORT_HOUR:MINUTE` 自动生成并推送。
 
-`NAPCAT_WEBHOOK` 为空时不会报错：日报照常生成并存档，只是不推送。
-可以先跑通主链路，机器人事后再接。
+### 5. 失败行为与排障
+
+- **自动重试**：推送失败会重试 3 次（间隔 5s / 15s），仍失败则徽标
+  显示「未推送」。日报正文始终存档不丢，随时可以重推。
+- **徽标一直「未推送」但手动能推成功** → 到点那一刻 NapCat 没在跑。
+  确认 napcat 容器 `restart: always` 且 NAS 已开机自启。
+- **推送返回 HTTP 401/403** → `NAPCAT_TOKEN` 填错了，必须是 HTTP
+   服务端的 Token，不是 WebUI 的。
+- **接口通但群收不到** → 机器人不在群里，或 `REPORT_GROUP_ID` 填错。
+- **完全没配 NapCat 时**：不报错，日报照常生成存档，只是不推送——
+  可以先跑通主链路，机器人事后再接。
 
 ---
 
@@ -216,5 +257,7 @@ curl -X POST http://NAS:8080/api/v1/reports/run \
 - [ ] 至少上传 1 个模板，并在客户端成功出过 1 张图
 - [ ] 员工机器的 PS 版本已确认（不同版本 COM 行为略有差异）
 - [ ] `server/data` 已纳入 NAS 定时备份
-- [ ] `ENABLE_SCHEDULER=1` 且日报能收到
+- [ ] `ENABLE_SCHEDULER=1`，且「每日日报」页能看到当天日报
+- [ ] NapCat 已部署，HTTP 服务端 Token 已填进 `NAPCAT_TOKEN`
+- [ ] 后台点「重推此日报」，QQ 群收到且徽标变「已推送」
 - [ ] 检查 `/health/ready` 返回 200

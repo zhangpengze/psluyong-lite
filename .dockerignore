@@ -1,0 +1,27 @@
+# 构建上下文瘦身：Dockerfile 只 COPY requirements.txt / server / bot / core，
+# 其余内容一律不进上下文——镜像更小、构建更快，也不会把开发库和演示图
+# 一起打进镜像。
+
+# 运行时数据（数据库 / 成品图 / 备份 / 日报）
+server/data/
+
+# 本地环境与缓存
+.venv/
+.git/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+# 不参与服务端镜像的目录
+client/
+docs/
+tests/
+scripts/
+
+# 密钥与本地产物
+.env
+.shots/
+.verify/
+.demo-client/
+.demo-output/
+.workbuddy/

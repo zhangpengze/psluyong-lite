@@ -1,0 +1,16 @@
+# 服务端 + 机器人
+Flask>=3.0.0
+Flask-SQLAlchemy>=3.1.1
+SQLAlchemy>=2.0.25
+Pillow>=10.2.0
+python-dotenv>=1.0.1
+tzdata>=2024.1  # Windows 上 zoneinfo 需要它，否则时区退化成 UTC
+waitress>=3.0.0
+APScheduler>=3.10.4
+requests>=2.31.0
+
+# 员工客户端与 Windows 开发机需要（COM 调 PS）；Linux 后端容器靠 marker 自动跳过
+pywin32>=306; sys_platform == "win32"
+
+# 测试
+pytest>=8.0.0

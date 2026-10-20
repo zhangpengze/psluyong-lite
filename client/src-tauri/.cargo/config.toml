@@ -1,0 +1,10 @@
+# 项目级 cargo 源配置：本机直连 crates.io 会被代理拦截（502 / 0 字节），
+# 走 rsproxy 镜像。放项目里不污染全局；有外网直连的环境可删除此文件。
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+retry = 3

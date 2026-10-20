@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+server/data/
+*.db
+.pytest_cache/
+client/node_modules/
+client/dist/
+client/src-tauri/target/
+# 打包产物由 scripts/build_sidecar.ps1 生成，仓库只留占位说明
+client/src-tauri/sidecar-dist/*
+!client/src-tauri/sidecar-dist/README.txt
+logs/
+
+# 本地演示产物
+.shots/
+.verify/
+.demo-client/
+.demo-output/
+.pytest_cache/
+
+# WorkBuddy 项目数据（记忆/日志），不属于源码
+.workbuddy/

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% set active = 'dashboard' %}
+{% block title %}仪表盘{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>仪表盘</h1>
+    <div class="sub">{{ today }} · 今日录用与近 7 天趋势</div>
+  </div>
+  <a class="btn ghost" href="{{ url_for('web.records') }}">查看全部记录</a>
+</div>
+
+<div class="grid grid-4">
+  <div class="kpi blue">
+    <div class="label">今日录用</div>
+    <div class="value">{{ today_stats.total }}</div>
+    <div class="hint">近 7 天共 {{ week_stats.total }} 条</div>
+  </div>
+  <div class="kpi green">
+    <div class="label">今日成功</div>
+    <div class="value">{{ today_stats.success }}</div>
+    <div class="hint">成功率 {{ today_stats.success_rate }}%</div>
+  </div>
+  <div class="kpi {{ 'red' if today_stats.failed else '' }}">
+    <div class="label">今日失败</div>
+    <div class="value">{{ today_stats.failed }}</div>
+    <div class="hint">{{ '需要关注' if today_stats.failed else '无失败记录' }}</div>
+  </div>
+  <div class="kpi">
+    <div class="label">今日活跃员工</div>
+    <div class="value">{{ by_employee|length }}</div>
+    <div class="hint">使用模板 {{ by_template|length }} 个</div>
+  </div>
+</div>
+
+<div class="grid grid-2" style="margin-top:14px">
+  <div class="card">
+    <h2>近 7 天录用趋势</h2>
+    <div class="spark">
+      {% for p in series %}
+        <div class="col" title="{{ p.date }} · {{ p.count }} 条">
+          <div class="cnt">{{ p.count if p.count else '' }}</div>
+          <div class="bar {{ 'zero' if p.count == 0 }}" style="height: {{ (p.count / peak * 100)|round(1) }}%"></div>
+          <div class="lbl">{{ p.date.strftime('%m-%d') }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>今日按员工</h2>
+    {% if by_employee %}
+      <div class="bars">
+        {% set emax = by_employee[0].count or 1 %}
+        {% for item in by_employee %}
+          <div class="bar-row">
+            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
+            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / emax * 100)|round(1) }}%"></div></div>
+            <div class="val">{{ item.count }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">今天还没有录用记录</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>今日按模板</h2>
+    {% if by_template %}
+      <div class="bars">
+        {% set tmax = by_template[0].count or 1 %}
+        {% for item in by_template %}
+          <div class="bar-row">
+            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
+            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / tmax * 100)|round(1) }}%"></div></div>
+            <div class="val">{{ item.count }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">今天还没有录用记录</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>今日按合作伙伴</h2>
+    {% if by_partner %}
+      <div class="bars">
+        {% set pmax = by_partner[0].count or 1 %}
+        {% for item in by_partner %}
+          <div class="bar-row">
+            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
+            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / pmax * 100)|round(1) }}%"></div></div>
+            <div class="val">{{ item.count }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">今天还没有录用记录</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <h2>最近 8 条记录</h2>
+  {% if recent %}
+    <table>
+      <thead>
+        <tr><th>图片</th><th>时间</th><th>员工</th><th>模板</th><th>合作伙伴</th><th>作者</th><th>标题</th><th>状态</th></tr>
+      </thead>
+      <tbody>
+        {% for r in recent %}
+          <tr>
+            <td>
+              {% if r.thumb_path %}
+                <img class="thumb" src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1) }}"
+                     onclick="openLightbox('{{ url_for('records.get_record_image', record_id=r.id) }}')" alt="">
+              {% else %}
+                <div class="noimg">无图</div>
+              {% endif %}
+            </td>
+            <td class="num">{{ r.created_at|localtime }}</td>
+            <td>{{ r.employee_name }}</td>
+            <td>{{ r.template_name }}</td>
+            <td>{{ r.partner_name or '-' }}</td>
+            <td>{{ r.author }}</td>
+            <td>{{ r.title }}</td>
+            <td><span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">还没有任何记录。员工客户端生成后会自动出现在这里。</div>
+  {% endif %}
+</div>
+{% endblock %}

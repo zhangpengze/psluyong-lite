@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ code }} · 期刊录用管理系统</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card" style="text-align:center">
+    <div style="font-size:44px;font-weight:800;color:#2563eb;line-height:1">{{ code }}</div>
+    <p style="color:#6b7688;margin:10px 0 20px">{{ message }}</p>
+    <a class="btn" href="{{ url_for('web.dashboard') }}">返回仪表盘</a>
+  </div>
+</div>
+</body>
+</html>

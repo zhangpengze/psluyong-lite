@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% set active = 'reports' %}
+{% block title %}每日日报{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>每日日报</h1>
+    <div class="sub">每天定时生成并推送到 QQ 群 · 这里可回看历史</div>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns: 220px 1fr">
+  <div class="card">
+    <h2>历史日报</h2>
+    {% if files %}
+      <div style="display:flex;flex-direction:column;gap:4px">
+        {% for f in files %}
+          <a href="{{ url_for('web.reports', file=f) }}"
+             style="padding:7px 10px;border-radius:7px;font-size:13px;{{ 'background:#eff4ff;font-weight:600' if f == selected else 'color:#33415c' }}">
+            {{ f }}
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty" style="padding:24px 0">还没有生成过日报</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>{{ selected or '日报预览' }}</h2>
+    {% if content %}
+      <pre class="report">{{ content }}</pre>
+    {% else %}
+      <div class="empty">
+        日报由后端定时任务生成。配置 <code>NAPCAT_WEBHOOK</code> 与 <code>REPORT_GROUP_ID</code> 后每天 {{ '%02d:%02d'|format(18, 0) }} 自动推送。
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

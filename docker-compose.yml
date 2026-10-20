@@ -1,0 +1,35 @@
+# 绿联 NAS / 任意 Docker 主机部署
+#
+#   cp .env.example .env   # 填好密钥
+#   docker compose up -d --build
+#
+# 图片与数据库都在 ./server/data，备份这个目录即可。
+
+services:
+  server:
+    build: .
+    image: psluyong-lite:latest
+    container_name: psluyong-lite
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      TZ: ${TZ:-Asia/Shanghai}
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-1}
+    volumes:
+      # NAS 共享文件夹挂到这里，重装容器不丢数据
+      - ./server/data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G

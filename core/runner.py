@@ -107,9 +107,14 @@ def run_export(req: ExportRequest) -> ExportResult:
         return done(False, message=error)
 
     try:
+        # 真实模板（录用通知 PSD）里占位符是嵌在整段文字中的，例如：
+        #   "姓名同志：您（你们）撰写的文章《草莓种植》经专家指导委员会……"
+        # 必须用「包含」替换（文字替换文字）。用「精确」全等匹配永远命中不了，
+        # 会直接踩零匹配治理判失败——员工侧表现是"一点生成就报错"。
+        # {{作者}} 这类独立占位符在包含模式下同样生效，两种模板写法都兼容。
         replacements = [
-            {"find": req.author_placeholder, "replace": author, "regex": False, "match_mode": "精确"},
-            {"find": req.title_placeholder, "replace": title, "regex": False, "match_mode": "精确"},
+            {"find": req.author_placeholder, "replace": author, "regex": False, "match_mode": "包含"},
+            {"find": req.title_placeholder, "replace": title, "regex": False, "match_mode": "包含"},
         ]
         ok, _, error = service.apply_text_replacements(replacements)
         warnings = list(getattr(service, "last_replacement_warnings", []) or [])

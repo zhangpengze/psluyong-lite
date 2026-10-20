@@ -32,6 +32,19 @@ KEEP_TASK_DIRS = 20
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _map_final(final: dict) -> dict:
+    """worker 终态文件 -> 对外状态字典（内存路径与磁盘回退路径共用）"""
+    return {
+        "state": final.get("state", "error"),
+        "finished": True,
+        "success": final.get("success", False),
+        "image_path": final.get("image_path", ""),
+        "message": final.get("message", ""),
+        "warnings": final.get("warnings", []),
+        "duration_ms": final.get("duration_ms", 0),
+    }
+
+
 class BusyError(RuntimeError):
     """已有一个生成任务在跑（COM 只能单任务驱动）"""
 
@@ -76,6 +89,16 @@ class Executor:
     def status(self, task_id: str) -> dict:
         task = self._tasks.get(task_id)
         if task is None:
+            # 任务已不在内存（reaper 巡查释放，或上一次轮询已读过终态）。
+            # 终态以磁盘 status.json 为准，绝不能报 unknown——那会让上层
+            # 落入"未成功"分支报"生成失败"：图已经生出来了、记录却没上报，
+            # 员工白干一次。真实 race：worker 退出后 reaper（5s 巡查）
+            # 先于客户端轮询（1s 间隔）释放任务，客户端就收到假失败。
+            from .config import app_data_dir
+
+            final = read_json(app_data_dir() / "executions" / task_id / "status.json")
+            if final is not None:
+                return _map_final(final)
             return {"state": "unknown", "finished": True}
 
         popen: subprocess.Popen = task["popen"]
@@ -84,15 +107,7 @@ class Executor:
 
         if final is not None:
             self._release(task_id)
-            return {
-                "state": final.get("state", "error"),
-                "finished": True,
-                "success": final.get("success", False),
-                "image_path": final.get("image_path", ""),
-                "message": final.get("message", ""),
-                "warnings": final.get("warnings", []),
-                "duration_ms": final.get("duration_ms", 0),
-            }
+            return _map_final(final)
 
         code = popen.poll()
         if code is None:

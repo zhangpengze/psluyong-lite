@@ -88,9 +88,17 @@ fn resolve_sidecar(app: &tauri::AppHandle) -> Option<Command> {    // 1) 环境�
 
     if repo_root.exists() {
         let python = std::env::var("PSLUYONG_PYTHON").unwrap_or_else(|_| "python".to_string());
-        let mut cmd = command_for(python);
+        // 开发模式不走 command_for：sidecar 日志继承到终端，
+        // `npm run tauri:dev` 能直接看到 COM 报错，排错不用猜。
+        // （打包模式保持 Stdio::null，员工不该看到控制台窗口）
+        let mut cmd = Command::new(python);
         cmd.current_dir(&repo_root)
             .args(["-m", "client.sidecar.server"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         return Some(cmd);
     }
 

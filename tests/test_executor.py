@@ -109,6 +109,79 @@ def test_executor_reports_uncertain_on_crash(tmp_path: Path):
     assert ex.running_task() is None
 
 
+def test_status_from_disk_after_release(tmp_path: Path):
+    """reaper 先于客户端轮询释放任务后，终态必须仍能从磁盘读回。
+
+    真实 race（50 条批量测试踩到）：worker 退出后，reaper 的 5s 巡查
+    先于客户端 1s 轮询释放了任务，之后查询落到 unknown，上层报
+    "生成失败"——图已经生出来了、记录却没上报，员工白干一次。
+    """
+    ex = Executor()
+    task_id = ex.start(_make_params(tmp_path))
+    task = ex._tasks[task_id]
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if read_json(task["dir"] / "status.json") is not None:
+            break
+        time.sleep(0.2)
+    assert read_json(task["dir"] / "status.json") is not None, "worker 应已写终态"
+
+    # 模拟 reaper 抢在客户端前面释放
+    ex._release(task_id)
+    assert ex.running_task() is None
+
+    status = ex.status(task_id)
+    assert status["finished"] is True
+    assert status["success"] is False
+    # 必须是 worker 的真实失败原因，而不是假报的"生成失败"
+    assert "模板文件不存在" in status["message"]
+
+
+def test_status_unknown_only_when_no_terminal_file(tmp_path: Path):
+    """磁盘上也没有终态文件时，才允许报 unknown"""
+    ex = Executor()
+    status = ex.status("从不存在的任务id")
+    assert status == {"state": "unknown", "finished": True}
+
+
+def test_no_lock_leak_under_reaper_poll_race(tmp_path: Path):
+    """reaper 与客户端轮询竞速多轮，执行器锁不允许泄漏。
+
+    背景：50 条批量真实测试中偶发一次 409「忙」——用本测试同款压力
+    验证证明产品代码获取/释放是平衡的（那次是环境层假象）。守住回归：
+    终态已交付给客户端后，下一次 start 必须立刻成功，绝不能报忙。
+    """
+    ex = Executor()
+
+    def params(i: int) -> dict:
+        p = _make_params(tmp_path)
+        p["author"] = f"压测{i}"
+        return p
+
+    def wait_terminal(task_dir: Path) -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if read_json(task_dir / "status.json") is not None:
+                return
+            time.sleep(0.05)
+        raise AssertionError("30 秒内未出终态")
+
+    for i in range(6):
+        task_id = ex.start(params(i))
+        wait_terminal(ex._tasks[task_id]["dir"])
+        if i % 2 == 0:
+            ex._release(task_id)  # reaper 先释放 -> 客户端随后走磁盘回退路径
+        status = ex.status(task_id)
+        assert status["finished"] is True
+        assert "模板文件不存在" in status["message"]
+
+        # 终态交付后必须能立刻启动下一个，不允许 BusyError
+        next_id = ex.start(params(i + 100))
+        wait_terminal(ex._tasks[next_id]["dir"])
+        ex._release(next_id)
+
+
 def test_status_file_survives_torn_write(tmp_path: Path):
     """params.json 损坏时读回 None，worker 报 error 而不是拿半截参数去跑 PS"""
     bad = tmp_path / "params.json"

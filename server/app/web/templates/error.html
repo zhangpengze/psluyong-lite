@@ -3,14 +3,22 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
 <title>{{ code }} · 期刊录用管理系统</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css', v=asset_version()) }}">
+<script>
+try {
+  var t = localStorage.getItem('psluyong-theme');
+  if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+} catch (e) {}
+</script>
 </head>
 <body>
 <div class="login-wrap">
   <div class="login-card" style="text-align:center">
-    <div style="font-size:44px;font-weight:800;color:#2563eb;line-height:1">{{ code }}</div>
-    <p style="color:#6b7688;margin:10px 0 20px">{{ message }}</p>
+    <div style="font-size:44px;font-weight:800;color:var(--primary);line-height:1">{{ code }}</div>
+    <p style="color:var(--muted);margin:10px 0 20px">{{ message }}</p>
     <a class="btn" href="{{ url_for('web.dashboard') }}">返回仪表盘</a>
   </div>
 </div>

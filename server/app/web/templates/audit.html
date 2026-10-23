@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% set active = 'audit' %}
+{% block title %}操作日志{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>操作日志</h1>
+    <div class="sub">删除、恢复、导出、重推与登录记录 · 共 {{ total }} 条</div>
+  </div>
+  <div class="actions">
+    <a class="btn ghost" href="{{ url_for('web.records') }}">回到记录页</a>
+  </div>
+</div>
+
+<form class="card mb-14" method="get" role="search" aria-label="按动作筛选">
+  <div class="filter-bar mb-0">
+    <div class="field">
+      <label for="f-action">动作</label>
+      <select id="f-action" name="action">
+        <option value="">全部动作</option>
+        {% for a in actions %}
+          <option value="{{ a.value }}" {{ 'selected' if a.value == action }}>{{ a.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn" type="submit">筛选</button>
+    {% if action %}<a class="btn ghost" href="{{ url_for('web.audit') }}">清除</a>{% endif %}
+  </div>
+</form>
+
+<div class="card">
+  {% if rows %}
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">后台操作审计流水，按时间倒序</caption>
+        <thead>
+          <tr>
+            <th scope="col">时间</th>
+            <th scope="col">操作者</th>
+            <th scope="col">动作</th>
+            <th scope="col">对象</th>
+            <th scope="col">详情</th>
+            <th scope="col">IP</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+            <tr>
+              <td class="num">{{ r.at|localtime('%Y-%m-%d %H:%M:%S') }}</td>
+              <td class="audit-actor">{{ r.actor }}</td>
+              <td>
+                <span class="tag {{ 'bad' if r.action in ('delete_record', 'login_failed', 'login_blocked') else ('warn' if r.action == 'restore_record' else 'mute') }}">
+                  {{ labels.get(r.action, r.action) }}
+                </span>
+              </td>
+              <td class="mono">{{ r.target or '-' }}</td>
+              <td class="clip" title="{{ r.detail or '' }}">{{ r.detail or '-' }}</td>
+              <td class="mono">{{ r.ip or '-' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if pages > 1 %}
+      <nav class="pager" aria-label="分页">
+        {% if page > 1 %}
+          <a href="{{ url_for('web.audit', page=page-1, action=action) }}" rel="prev">上一页</a>
+        {% endif %}
+        <span class="cur" aria-current="page">{{ page }} / {{ pages }}</span>
+        {% if page < pages %}
+          <a href="{{ url_for('web.audit', page=page+1, action=action) }}" rel="next">下一页</a>
+        {% endif %}
+        <span class="info">共 {{ total }} 条</span>
+      </nav>
+    {% endif %}
+  {% else %}
+    <div class="empty">
+      <div class="empty-title">还没有操作记录</div>
+      <div>删除、恢复、导出 CSV、重推日报和登录都会记在这里</div>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

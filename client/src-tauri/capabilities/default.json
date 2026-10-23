@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "默认权限：只用到窗口基础能力，不开放文件系统与 shell",
-  "windows": ["main"],
+  "windows": ["main", "history", "settings"],
   "permissions": ["core:default"]
 }

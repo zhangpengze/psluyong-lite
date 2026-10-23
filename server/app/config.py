@@ -63,6 +63,19 @@ class Config:
     NAPCAT_TOKEN = os.getenv("NAPCAT_TOKEN", "").strip()
     REPORT_GROUP_ID = os.getenv("REPORT_GROUP_ID", "").strip()
 
+    # QQ 机器人反向指令（群里发「汇总」→ 私聊回复当天日报）
+    # 白名单：允许触发指令的 QQ 号，逗号分隔；空 = 不限制
+    BOT_ADMIN_QQ_IDS = os.getenv("BOT_ADMIN_QQ_IDS", "").strip()
+    # 回调校验密钥：NapCat 上报头里带同一个值才处理；空 = 不校验（内网信任边界）
+    BOT_CALLBACK_SECRET = os.getenv("BOT_CALLBACK_SECRET", "").strip()
+    # 同一人触发指令的冷却秒数，防连点/重复上报
+    BOT_COOLDOWN_S = int(os.getenv("BOT_COOLDOWN_S", "10"))
+
+    # 失败即时告警：录用失败立刻推群，不等当天日报
+    ALERT_ON_FAILURE = os.getenv("ALERT_ON_FAILURE", "1") == "1"
+    # 告警最小间隔秒数：PS 故障时批量失败不会把群刷爆
+    ALERT_MIN_INTERVAL_S = int(os.getenv("ALERT_MIN_INTERVAL_S", "5"))
+
     # 其他
     TZ = os.getenv("TZ", "Asia/Shanghai")
     ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "1") == "1"

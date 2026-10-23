@@ -3,26 +3,38 @@
 {% block title %}录用记录{% endblock %}
 
 {% block content %}
+<div id="records-root" data-admin="{{ 'true' if me and me.is_admin else 'false' }}">
+
 <div class="page-head">
   <div>
     <h1>录用记录</h1>
-    <div class="sub">{{ start }} ~ {{ end }} · 共 {{ total }} 条</div>
+    <div class="sub">{{ start }} ~ {{ end }} · 共 {{ total }} 条{% if pages > 1 %} · 第 {{ page }} / {{ pages }} 页{% endif %}</div>
+  </div>
+  <div class="actions">
+    <a class="btn ghost" href="{{ url_for('records.export_records', start=start, end=end, **filter_args) }}"
+       rel="nofollow">导出 CSV</a>
   </div>
 </div>
 
-<form class="card" method="get" style="margin-bottom:14px">
+<form class="card mb-14" method="get" id="filter-form" role="search" aria-label="记录筛选">
+  <div class="quick-ranges">
+    {% for qr in quick_ranges %}
+      <a class="chip {{ 'active' if qr.active }}" href="{{ url_for('web.records', start=qr.start, end=qr.end, **filter_args) }}"
+         {% if qr.active %}aria-current="true"{% endif %}>{{ qr.label }}</a>
+    {% endfor %}
+  </div>
   <div class="filter-bar">
     <div class="field">
-      <label>开始日期</label>
-      <input type="date" name="start" value="{{ start }}">
+      <label for="f-start">开始日期</label>
+      <input type="date" id="f-start" name="start" value="{{ start }}" max="{{ end }}">
     </div>
     <div class="field">
-      <label>结束日期</label>
-      <input type="date" name="end" value="{{ end }}">
+      <label for="f-end">结束日期</label>
+      <input type="date" id="f-end" name="end" value="{{ end }}" max="{{ today }}">
     </div>
     <div class="field">
-      <label>员工</label>
-      <select name="employee">
+      <label for="f-employee">员工</label>
+      <select id="f-employee" name="employee">
         <option value="">全部</option>
         {% for e in employees %}
           <option value="{{ e }}" {{ 'selected' if e == employee }}>{{ e }}</option>
@@ -30,8 +42,8 @@
       </select>
     </div>
     <div class="field">
-      <label>合作伙伴</label>
-      <select name="partner">
+      <label for="f-partner">合作伙伴</label>
+      <select id="f-partner" name="partner">
         <option value="">全部</option>
         {% for p in partners %}
           <option value="{{ p }}" {{ 'selected' if p == partner }}>{{ p }}</option>
@@ -39,40 +51,55 @@
       </select>
     </div>
     <div class="field">
-      <label>状态</label>
-      <select name="status">
+      <label for="f-status">状态</label>
+      <select id="f-status" name="status">
         <option value="">全部</option>
         <option value="success" {{ 'selected' if status == 'success' }}>成功</option>
         <option value="failed" {{ 'selected' if status == 'failed' }}>失败</option>
       </select>
     </div>
-    <div class="field" style="flex:1; min-width:180px">
-      <label>关键词（作者 / 标题 / 模板 / 合作伙伴）</label>
-      <input type="text" name="q" value="{{ q }}" placeholder="输入任意关键词">
+    <div class="field wide">
+      <label for="f-q">关键词（作者 / 标题 / 模板 / 合作伙伴）</label>
+      <input type="search" id="f-q" name="q" value="{{ q }}" placeholder="输入任意关键词">
     </div>
-    <button class="btn" type="submit">筛选</button>
+    <button class="btn" type="submit" id="filter-submit">筛选</button>
     <a class="btn ghost" href="{{ url_for('web.records') }}">重置</a>
   </div>
 </form>
 
 <div class="card">
   {% if rows %}
-    <table>
-      <thead>
-        <tr>
-          <th>图片</th><th>日期</th><th>提交时间</th><th>员工</th><th>模板</th><th>合作伙伴</th>
-          <th>作者</th><th>标题</th><th>耗时</th><th>状态</th><th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rows %}
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">录用记录列表，点击任意一行展开完整详情</caption>
+        <thead>
           <tr>
+            <th scope="col">图片</th><th scope="col">日期</th><th scope="col">提交时间</th>
+            <th scope="col">员工</th><th scope="col">模板</th><th scope="col">合作伙伴</th>
+            <th scope="col">作者</th><th scope="col">标题</th><th scope="col">耗时</th>
+            <th scope="col">状态</th><th scope="col"><span class="sr-only">操作</span></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for r in rows %}
+          <tr class="row-click" data-id="{{ r.id }}" tabindex="0" aria-expanded="false"
+              title="点击或按回车查看完整详情">
             <td>
               {% if r.thumb_path %}
-                <img class="thumb" src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1) }}"
-                     onclick="openLightbox('{{ url_for('records.get_record_image', record_id=r.id) }}')" alt="">
+                <img class="thumb" loading="lazy" decoding="async" width="46" height="46"
+                     src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1) }}"
+                     data-full="{{ url_for('records.get_record_image', record_id=r.id) }}"
+                     data-alt="{{ r.employee_name }} · {{ r.author }}《{{ r.title }}》成品图"
+                     alt="预览 {{ r.author }}《{{ r.title }}》">
+              {% elif r.image_path %}
+                {# 缩略图生成失败时回退原图，别让有图的记录显示"无图" #}
+                <img class="thumb" loading="lazy" decoding="async" width="46" height="46"
+                     src="{{ url_for('records.get_record_image', record_id=r.id) }}"
+                     data-full="{{ url_for('records.get_record_image', record_id=r.id) }}"
+                     data-alt="{{ r.employee_name }} · {{ r.author }}《{{ r.title }}》成品图"
+                     alt="预览 {{ r.author }}《{{ r.title }}》">
               {% else %}
-                <div class="noimg">无图</div>
+                <div class="noimg" role="img" aria-label="无图片">无图</div>
               {% endif %}
             </td>
             <td class="num">{{ r.work_date }}</td>
@@ -81,51 +108,93 @@
             <td>{{ r.template_name }}</td>
             <td>{{ r.partner_name or '-' }}</td>
             <td>{{ r.author }}</td>
-            <td>{{ r.title }}</td>
-            <td class="num">{{ (r.processing_ms / 1000)|round(1) }}s</td>
+            <td class="clip" title="{{ r.title }}">{{ r.title }}</td>
+            <td class="num">{{ ((r.processing_ms or 0) / 1000)|round(1) }}s</td>
             <td>
               <span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span>
-              {% if r.error_message %}<div style="font-size:11.5px;color:#dc2626;margin-top:3px">{{ r.error_message }}</div>{% endif %}
+              {% if r.error_message %}<div class="clip err-inline" title="{{ r.error_message }}">{{ r.error_message }}</div>{% endif %}
             </td>
             <td>
               {% if me and me.is_admin %}
-                <button class="btn ghost sm" onclick="delRecord({{ r.id }})">删除</button>
+                <button class="btn ghost sm" type="button" data-delete="{{ r.id }}"
+                        aria-label="删除 {{ r.employee_name }} 的这条记录">删除</button>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if pages > 1 %}
+      <nav class="pager" aria-label="分页">
+        {% if page > 1 %}
+          <a href="{{ url_for('web.records', page=page-1, start=start, end=end, **filter_args) }}" rel="prev">上一页</a>
+        {% endif %}
+        <span class="cur" aria-current="page">{{ page }} / {{ pages }}</span>
+        {% if page < pages %}
+          <a href="{{ url_for('web.records', page=page+1, start=start, end=end, **filter_args) }}" rel="next">下一页</a>
+        {% endif %}
+        <span class="info">共 {{ total }} 条</span>
+      </nav>
+    {% endif %}
+  {% else %}
+    <div class="empty">
+      <div class="empty-title">没有符合条件的记录</div>
+      <div>{{ start }} ~ {{ end }}{% if employee or partner or status or q %}，且带着当前筛选条件{% endif %}</div>
+      <a class="btn ghost" href="{{ url_for('web.records') }}">清除筛选，看近 7 天</a>
+    </div>
+  {% endif %}
+</div>
+
+{% if deleted_rows %}
+<details class="gone-box">
+  <summary>回收站 · {{ deleted_rows|length }} 条已删除记录{% if deleted_total > deleted_rows|length %}（共 {{ deleted_total }} 条，仅显示当前日期区间内）{% endif %} · 图片文件仍保留</summary>
+  <div class="table-wrap">
+    <table>
+      <caption class="sr-only">已删除记录，可恢复</caption>
+      <thead>
+        <tr><th scope="col">图片</th><th scope="col">日期</th><th scope="col">删除时间</th>
+          <th scope="col">员工</th><th scope="col">作者</th><th scope="col">标题</th>
+          <th scope="col">状态</th><th scope="col"><span class="sr-only">操作</span></th></tr>
+      </thead>
+      <tbody>
+        {% for r in deleted_rows %}
+          <tr>
+            <td>
+              {% if r.thumb_path %}
+                <img class="thumb" loading="lazy" decoding="async" width="46" height="46"
+                     src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1) }}"
+                     data-full="{{ url_for('records.get_record_image', record_id=r.id) }}"
+                     data-alt="{{ r.author }}《{{ r.title }}》成品图"
+                     alt="预览 {{ r.author }}《{{ r.title }}》">
+              {% else %}
+                <div class="noimg" role="img" aria-label="无图片">无图</div>
+              {% endif %}
+            </td>
+            <td class="num">{{ r.work_date }}</td>
+            <td class="num">{{ r.deleted_at|localtime }}</td>
+            <td>{{ r.employee_name }}</td>
+            <td>{{ r.author }}</td>
+            <td class="clip" title="{{ r.title }}">{{ r.title }}</td>
+            <td><span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span></td>
+            <td>
+              {% if me and me.is_admin %}
+                <button class="btn ghost sm" type="button" data-restore="{{ r.id }}"
+                        aria-label="恢复 {{ r.employee_name }} 的这条记录">恢复</button>
               {% endif %}
             </td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
+  </div>
+</details>
+{% endif %}
 
-    {% if pages > 1 %}
-      {% set base_args = request.args.to_dict() %}
-      {% set _ = base_args.pop('page', None) %}
-      <div class="pager">
-        {% if page > 1 %}
-          <a href="{{ url_for('web.records', page=page-1, **base_args) }}">上一页</a>
-        {% endif %}
-        <span class="cur">{{ page }} / {{ pages }}</span>
-        {% if page < pages %}
-          <a href="{{ url_for('web.records', page=page+1, **base_args) }}">下一页</a>
-        {% endif %}
-      </div>
-    {% endif %}
-  {% else %}
-    <div class="empty">没有符合条件的记录</div>
-  {% endif %}
 </div>
 {% endblock %}
 
 {% block scripts %}
-{% if me and me.is_admin %}
-<script>
-async function delRecord(id) {
-  if (!confirm('确认删除这条记录？删除后不再出现在列表与统计中（图片文件保留）。')) return;
-  const res = await fetch(`/api/v1/records/${id}`, { method: 'DELETE' });
-  const data = await res.json();
-  if (data.ok) location.reload();
-  else alert(data.error || '删除失败');
-}
-</script>
-{% endif %}
+<script src="{{ url_for('static', filename='records.js', v=asset_version()) }}"></script>
 {% endblock %}

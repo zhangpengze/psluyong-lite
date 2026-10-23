@@ -213,7 +213,7 @@ class PSService:
                 }
             except Exception:  # noqa: BLE001 - 取不到字体表不阻断生成，只降级为告警
                 available_fonts = None
-                warnings.append("字体可用性未验证，请预览确认")
+                warnings.append("字体可用性未验证，请打开成品图确认")
 
             def process_layers(layers_obj: Any) -> None:
                 nonlocal first_replacement_text, changed_layer_count
@@ -313,7 +313,7 @@ class PSService:
             if bounds[0] < 0 or bounds[1] < 0 or bounds[2] > width or bounds[3] > height:
                 warnings.append(f"图层「{layer_name}」文本超出画布")
             if int(text_item.Kind) == 2:
-                warnings.append(f"图层「{layer_name}」段落框内部溢出未验证，请预览确认")
+                warnings.append(f"图层「{layer_name}」段落框内部溢出未验证，请打开成品图确认")
         except Exception:  # noqa: BLE001
             warnings.append(f"图层「{layer_name}」文本边界未验证")
 
@@ -395,7 +395,7 @@ class PSService:
             out_file = Path(str(output_path))
             if not out_file.exists() or out_file.stat().st_size <= 0:
                 logger.error("导出文件未真实落盘: %s", output_path)
-                return False, "导出文件未生成，请检查输出目录与磁盘空间后重试"
+                return False, f"导出文件未生成（目标: {output_path}），请检查输出目录与磁盘空间后重试"
 
             return True, ""
 
@@ -405,9 +405,11 @@ class PSService:
             if pywintypes is not None and isinstance(e, pywintypes.com_error):
                 msg = self._format_com_error(e)
                 logger.error("导出文档 COM 错误: %s", msg)
-                return False, f"导出失败: {msg}"
+                # 带上目标路径：「文件不存在」这类通用翻译不说是哪个文件，
+                # 员工永远想不到是设置里的输出目录填错了
+                return False, f"导出失败: {msg}（目标: {output_path}）"
             logger.error("导出文档失败: %s", e)
-            return False, f"导出失败: {e}"
+            return False, f"导出失败: {e}（目标: {output_path}）"
 
 
 _ps_service: "PSService | None" = None

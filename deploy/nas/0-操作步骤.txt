@@ -1,0 +1,89 @@
+psluyong-lite → 绿联 DH4300 Plus（ARM64）部署
+================================================
+
+包内文件
+--------
+0-操作步骤.txt        本文档
+Dockerfile            构建镜像用（第一行是 FROM python:3.11-slim）
+docker-compose.yml    编排（第一行是 services:）
+.env                  全部配置已填好（隐藏文件，需要开"显示隐藏文件"才看得见）
+.dockerignore         让 data/ 不进构建上下文
+requirements.txt      Python 依赖
+server/  bot/  core/  源码（共 41 个文件）
+data/                 现有数据：app.db + 190 张成品图 + 日报
+
+一、上传解压
+------------
+1. UGOS「文件管理」→ docker 共享文件夹 → 新建目录 psluyong-lite
+2. 上传本 zip（**单个文件上传，不要用上传文件夹**）
+3. 右键 zip → 解压到当前目录
+4. 解压后必须满足：
+   - docker/psluyong-lite/ 第一层直接看到 docker-compose.yml、Dockerfile
+   - 第一层有 server/ bot/ core/ data/ 四个文件夹
+   - 没有 psluyong-lite/psluyong-lite-nas/... 这种多套一层
+5. 文件管理右上角勾选「显示隐藏文件」，确认 .env 和 .dockerignore 在
+
+二、建项目
+----------
+UGOS「Docker」→「项目」→「创建」
+  项目名称   psluyong-lite
+  项目目录   docker/psluyong-lite
+  编排文件   docker-compose.yml
+创建后启动。首次构建 2~5 分钟。
+
+注意：如果界面让你填「Dockerfile」内容，那这里要填 Dockerfile 文件的内容，
+不要填 compose 的 YAML。两者填反会报
+  dockerfile parse error on line 1: unknown instruction: ...
+
+三、验证
+--------
+http://NAS的IP:8080/health/ready     返回 ok
+http://NAS的IP:8080/                 账号 admin，密码见 .env 的 ADMIN_PASSWORD
+                                   （首次登录后请立刻改掉）
+
+四、验收日报推送
+----------------
+后台「每日日报」→ 选一天 → 「重推此日报」→ QQ 群 134132323 收到消息
+
+五、构建日志怎么看好坏
+----------------------
+=> => transferring context: 几十~200kB   ✓ 文件传全了
+=> => transferring context: 3.32kB       ✗ server/bot/core 没上传
+=> [4/8] RUN pip install ...             ✓ 走清华源，1~2 分钟
+下载速度只有十几 kB/s 或 read timed out  ✗ Dockerfile 里残留了 pypi.org 源
+
+六、失败对照
+------------
+容器一直「重启中」+ 日志 PermissionError: '/app/data/images'
+    → 挂载目录属主 / ACL 问题。本包 compose 已带 user: "0:0" 与启动前
+      chmod -R 777 /app/data，正常不会再出现。
+      若仍出现：文件管理里把 data 目录权限改成所有人读写；再不行就把
+      volumes 换成命名卷 psluyong_data:/app/data（会牺牲现有数据）。
+
+dockerfile parse error / unknown instruction
+    → Dockerfile 里装的是 compose 内容，两个文件搞反了
+
+COPY server ... not found
+    → 构建上下文只有 3.32kB，源码目录没上传全
+
+env file .env not found / SECRET_KEY 未设置
+    → .env 没上传，或存成了 .env.txt（Windows 隐藏扩展名的坑）
+
+推送 401/403
+    → .env 的 NAPCAT_TOKEN 与 NapCat「网络配置 → HTTP 服务端」Token 不一致
+
+推送「连不上」
+    → 把 .env 的 NAPCAT_WEBHOOK 改成 http://NAS的局域网IP:13000，重启项目
+
+群不存在 / 无权限
+    → 扫码登录的 QQ 不在 134132323 群里，或群号写错
+
+七、这台机器是 ARM64
+--------------------
+日志里 wheel 名带 aarch64。以后拉镜像要选有 ARM 版本的，
+否则报 exec format error。python:3.11-slim 与 napcat-docker 都支持。
+
+八、备份与安全
+--------------
+备份只需备份 data/ 目录。
+8080 是管理后台，不要直接暴露公网，只在内网用或前面挂 HTTPS 反代。

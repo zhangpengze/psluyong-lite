@@ -46,6 +46,8 @@ class ClientConfig:
     auto_clear: bool = True
     last_template_id: str = ""
     last_partner: str = ""
+    # 上次生成用的作者：下次打开自动带出，同一位作者连投多篇不用重复打
+    last_author: str = ""
     # 合作伙伴名单：员工自己维护，存本机，断网也能选
     partners: list[str] = field(default_factory=list)
     # PSD 模板所在目录（员工把模板文件拷进去即可）
@@ -53,11 +55,25 @@ class ClientConfig:
     # 模板里两组待替换的查找文字（全局固定，和原项目一致，在设置页修改）
     author_placeholder: str = "{{作者}}"
     title_placeholder: str = "{{标题}}"
-    # 窗口三件套：置顶 / 贴边（left/right/空） / 上次窗口位置（-1 表示未记录）
+    # 成品图命名：author = 作者.jpg / author_title = 作者_标题.jpg
+    # 同名自动加 (2)(3)，不覆盖已有文件
+    filename_rule: str = "author_title"
+    # 窗口三件套：置顶 / 贴边（left/right/top/空） / 上次窗口位置（-1 表示未记录）
     always_on_top: bool = False
     dock_side: str = ""
+    # 拖到屏幕边缘 24px 内松手自动贴边（设置里可关）
+    auto_dock: bool = True
+    # 关闭主窗 = 隐藏到托盘（防误关）；关掉则关闭即退出
+    close_to_tray: bool = True
     win_x: int = -1
     win_y: int = -1
+    # 记录窗 / 设置窗各自的位置记忆（-1 表示未记录，打开时居中）
+    history_win_x: int = -1
+    history_win_y: int = -1
+    settings_win_x: int = -1
+    settings_win_y: int = -1
+    # 界面主题：dark / light，跟随系统不做自动判断，员工在设置里切换
+    theme: str = "dark"
 
     def to_dict(self) -> dict:
         return asdict(self)

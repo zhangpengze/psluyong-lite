@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_AUTHOR_PLACEHOLDER = "{{作者}}"
 DEFAULT_TITLE_PLACEHOLDER = "{{标题}}"
 
+# 成品图命名规则（员工在客户端设置里选）
+#   author       李四.jpg
+#   author_title 李四_基于深度学习的图像分割方法研究.jpg
+FILENAME_RULE_AUTHOR = "author"
+FILENAME_RULE_AUTHOR_TITLE = "author_title"
+FILENAME_RULES = (FILENAME_RULE_AUTHOR, FILENAME_RULE_AUTHOR_TITLE)
+DEFAULT_FILENAME_RULE = FILENAME_RULE_AUTHOR_TITLE
+
 # Windows 文件名非法字符
 _ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 
@@ -42,6 +50,8 @@ class ExportRequest:
     author_placeholder: str = DEFAULT_AUTHOR_PLACEHOLDER
     title_placeholder: str = DEFAULT_TITLE_PLACEHOLDER
     ps_path: str = ""
+    # 成品图命名规则：author / author_title
+    filename_rule: str = DEFAULT_FILENAME_RULE
 
 
 @dataclass
@@ -62,11 +72,37 @@ def safe_filename(text: str, max_len: int = 40) -> str:
 
 
 def build_output_path(req: ExportRequest) -> Path:
-    """输出路径：作者_标题_时间戳.jpg"""
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    """输出路径，按设置的命名规则生成。
+
+    不再默认带时间戳：员工要的是"一眼能在文件夹里找到某个人的图"，
+    `李四_20261021_183343.jpg` 找起来反而费劲。重名由 _unique_path 兜底加序号，
+    绝不覆盖已有文件（覆盖等于悄悄丢掉上一次的成品）。
+    """
     suffix = "jpg" if req.output_format.upper() in ("JPG", "JPEG") else req.output_format.lower()
-    name = f"{safe_filename(req.author)}_{safe_filename(req.title)}_{stamp}.{suffix}"
-    return Path(req.output_dir) / name
+    rule = (req.filename_rule or DEFAULT_FILENAME_RULE).strip().lower()
+    if rule not in FILENAME_RULES:
+        rule = DEFAULT_FILENAME_RULE
+
+    parts = [safe_filename(req.author)]
+    if rule == FILENAME_RULE_AUTHOR_TITLE:
+        parts.append(safe_filename(req.title))
+    stem = "_".join(p for p in parts if p)
+    return _unique_path(Path(req.output_dir), stem, suffix)
+
+
+def _unique_path(base: Path, stem: str, suffix: str) -> Path:
+    """同名不覆盖：已存在就加 (2)、(3)……
+
+    极端情况（同一作者上千张）退回时间戳，仍然不覆盖。
+    """
+    target = base / f"{stem}.{suffix}"
+    if not target.exists():
+        return target
+    for i in range(2, 1000):
+        candidate = base / f"{stem}({i}).{suffix}"
+        if not candidate.exists():
+            return candidate
+    return base / f"{stem}_{datetime.now():%Y%m%d_%H%M%S}.{suffix}"
 
 
 def run_export(req: ExportRequest) -> ExportResult:

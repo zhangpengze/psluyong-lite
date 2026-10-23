@@ -71,6 +71,10 @@ class Executor:
             task_dir = app_data_dir() / "executions" / task_id
             task_dir.mkdir(parents=True, exist_ok=True)
             write_json_atomic(task_dir / "params.json", params)
+            # 立即初始化心跳文件：worker 的首次 touch 在第 2 秒，不预热的话
+            # 前两秒 heartbeat.exists() 为 False，age 按 999s 算 → 客户端
+            # 会误报「耗时比平时长」（真实踩坑：刚点生成就弹告警）
+            (task_dir / "heartbeat").touch()
 
             popen = self._spawn_worker(task_dir)
             self._tasks[task_id] = {

@@ -3,8 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
 <title>登录 · 期刊录用管理系统</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css', v=asset_version()) }}">
+<script>
+try {
+  var t = localStorage.getItem('psluyong-theme');
+  if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+} catch (e) {}
+</script>
 </head>
 <body>
 <div class="login-wrap">
@@ -13,23 +21,37 @@
     <div class="sub">PS 模板批量生成 · 工作日志汇总</div>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% for category, message in messages %}
-        <div class="flash {{ category }}">{{ message }}</div>
-      {% endfor %}
+      {% if messages %}
+        <div role="alert">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
     {% endwith %}
 
-    <form method="post">
+    {% if locked_message %}
+      <div class="flash error" role="alert">{{ locked_message }}</div>
+    {% endif %}
+
+    <form method="post" id="login-form">
       <div class="field">
         <label for="username">用户名</label>
-        <input type="text" id="username" name="username" value="{{ username }}" autocomplete="username" required autofocus>
+        <input type="text" id="username" name="username" value="{{ username }}"
+               autocomplete="username" required autofocus>
       </div>
       <div class="field">
         <label for="password">密码</label>
-        <input type="password" id="password" name="password" autocomplete="current-password" required>
+        <div class="pw-wrap">
+          <input type="password" id="password" name="password" autocomplete="current-password" required>
+          <button type="button" class="pw-toggle" id="pw-toggle"
+                  aria-label="显示密码" aria-pressed="false" aria-controls="password">显示</button>
+        </div>
       </div>
-      <button class="btn" type="submit">登录</button>
+      <button class="btn" type="submit" id="login-submit">登录</button>
     </form>
   </div>
 </div>
+<script src="{{ url_for('static', filename='login.js', v=asset_version()) }}"></script>
 </body>
 </html>

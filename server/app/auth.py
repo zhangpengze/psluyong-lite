@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import hmac
 import logging
+import secrets
 from functools import wraps
 
-from flask import g, jsonify, redirect, request, session, url_for
+from flask import abort, g, jsonify, redirect, request, session, url_for
 
 from .config import Config
 from .models import AdminUser
@@ -87,7 +88,8 @@ def admin_required(view):
         if not user.is_admin:
             if request.path.startswith("/api/"):
                 return jsonify({"ok": False, "error": "需要管理员权限"}), 403
-            return "需要管理员权限", 403
+            # 页面走统一的 403 错误页，别再甩一行纯文本出去
+            abort(403)
         return view(*args, **kwargs)
 
     return wrapper
@@ -105,5 +107,40 @@ def api_or_session(view):
             g.auth_via = "session"
             return view(*args, **kwargs)
         return _unauthorized("请先登录或提供 API Key")
+
+    return wrapper
+
+
+# ========== CSRF ==========
+
+def generate_csrf_token() -> str:
+    """取（没有则生成）当前会话的 CSRF token，模板里渲染进 <meta>"""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_urlsafe(32)
+    return session["csrf_token"]
+
+
+def validate_csrf_token() -> bool:
+    """常量时间比较，避免按响应时间逐字节猜 token"""
+    sent = request.headers.get("X-CSRF-Token") or request.form.get("_csrf") or ""
+    expected = session.get("csrf_token") or ""
+    return bool(sent) and bool(expected) and hmac.compare_digest(str(expected), str(sent))
+
+
+def csrf_protect(view):
+    """会话认证的写操作必须带 CSRF token。
+
+    API Key 请求豁免：key 走自定义头 X-API-Key，跨站表单/脚本根本加不了
+    这个头（浏览器会先发 CORS 预检，服务端不放行就直接失败），天然防 CSRF。
+    """
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if check_api_key(request.headers.get("X-API-Key", "")):
+            return view(*args, **kwargs)
+        if not validate_csrf_token():
+            logger.warning("CSRF 校验失败 ip=%s path=%s", request.remote_addr, request.path)
+            return jsonify({"ok": False, "error": "安全校验失败，请刷新页面后重试"}), 403
+        return view(*args, **kwargs)
 
     return wrapper

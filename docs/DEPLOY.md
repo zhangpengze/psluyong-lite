@@ -64,7 +64,8 @@ docker compose logs -f server
 
 - 容器限制：2 核 / 1G 内存，实测空闲约 80MB。
 - 数据全部在 `./server/data`：
-  - `app.db` — SQLite 数据库
+  - `app.db` — SQLite 数据库（运行时旁边还会有 `app.db-wal` / `app.db-shm`，
+    这是 WAL 模式的正常产物，**打包备份时一并带上或先停容器**）
   - `images/年/月/日/` — 成品图与缩略图
   - `backups/` — 每天 03:30 自动热备（gzip，保留最近 10 份）
   - `reports/` — 每日日报 Markdown
@@ -109,6 +110,35 @@ PY
 用绿联自带反向代理指向 `127.0.0.1:8080`，并加 HTTPS。若启用 HTTPS，
 在 `.env` 里设 `FORCE_HTTPS=1`，否则登录 Cookie 不会带 `Secure` 标记。
 外网访问可用自带的 UGREENlink，不必自己折腾 DDNS。
+
+### 6. 数据库并发（WAL 与网络盘）
+
+默认 `SQLITE_JOURNAL_MODE=WAL`：读写不互斥，多线程下不会再偶发
+`database is locked`，是 8 线程 waitress + 多人同时提交的正确配置。
+
+但它有一个前提——**数据库必须在本地磁盘上**。WAL 依赖共享内存文件
+`app.db-shm`，在 NFS / SMB 网络共享上行为不可靠（可能出现读不到最新数据）。
+`./server/data` 是 NAS 本地卷，默认没问题；如果你把 data 目录改成了挂载
+的网络共享，请在 `.env` 里改成：
+
+```bash
+SQLITE_JOURNAL_MODE=DELETE
+```
+
+判断当前生效的模式：
+
+```bash
+docker exec psluyong-lite python -c "
+from server.app import create_app
+from server.app.db import db
+from sqlalchemy import text
+app = create_app()
+with app.app_context():
+    print(db.session.execute(text('PRAGMA journal_mode')).scalar())
+"
+```
+
+输出 `wal` 即正常。
 
 ---
 
@@ -233,7 +263,55 @@ docker compose up -d
    联调 NapCat 就用这个按钮，不用敲命令。
 3. 定时任务每天 `DAILY_REPORT_HOUR:MINUTE` 自动生成并推送。
 
-### 5. 失败行为与排障
+### 5. 群内指令（可选）：群里发指令自动回日报
+
+不想等每天定时推送，可以在群里发指令，机器人**私聊**回复触发者
+（不推群、不刷屏；私聊失败才 fallback 发回群里）。
+
+1. NapCat WebUI →「网络配置」→ 新建/启用 **HTTP 上报**（反向 post）：
+   - 上报地址 `http://<NAS局域网IP>:8080/api/v1/bot/onebot`
+   - 勾选**群消息**上报，心跳/通知类不用开
+   - 请求头加 `X-Bot-Secret: <你的密钥>`（配了 `BOT_CALLBACK_SECRET` 才需要）
+2. `.env` 补上：
+
+```bash
+# 允许触发指令的 QQ 号，逗号分隔；留空 = 群里任何人都能触发
+BOT_ADMIN_QQ_IDS=10001,10002
+# 回调校验密钥，与 NapCat 上报请求头 X-Bot-Secret 保持一致；留空 = 不校验
+BOT_CALLBACK_SECRET=
+# 同一人触发冷却秒数，防连点
+BOT_COOLDOWN_S=10
+```
+
+3. 重启 `docker compose up -d`，在群里发指令即可。
+
+指令集（精确匹配，多说一个字都不触发，避免正常聊天被误触发）：
+
+| 指令 | 回复 |
+|---|---|
+| `汇总` / `日报` / `数据汇总` | 当天日报 |
+| `汇总 昨天` / `前天` / `今天` | 指定某天日报 |
+| `汇总 MM-DD` / `汇总 YYYY-MM-DD` | 指定日期日报 |
+| `汇总 本周` / `本月` / `上周` | 区间汇总（带「按日」拆分） |
+| `帮助` / `指令` | 指令列表 |
+
+日期参数无法识别时（如 `汇总 乱码`）也回帮助文案。每次触发在后台
+「操作日志」留一条 `群内指令` 流水（actor=QQ 号，可追溯谁触发过）。
+
+### 6. 失败即时告警
+
+录用失败**立刻**推到 `REPORT_GROUP_ID`，不等当天日报——失败意味着员工
+白跑一趟 PS，越早止损越好。
+
+```bash
+ALERT_ON_FAILURE=1       # 1=开 0=关
+ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把群刷爆
+```
+
+告警内容：员工/模板/稿件/失败原因/时间。推送失败不影响记录本身
+（记录已落库，只是通知不到）。
+
+### 7. 失败行为与排障
 
 - **自动重试**：推送失败会重试 3 次（间隔 5s / 15s），仍失败则徽标
   显示「未推送」。日报正文始终存档不丢，随时可以重推。
@@ -257,7 +335,10 @@ docker compose up -d
 - [ ] 至少上传 1 个模板，并在客户端成功出过 1 张图
 - [ ] 员工机器的 PS 版本已确认（不同版本 COM 行为略有差异）
 - [ ] `server/data` 已纳入 NAS 定时备份
+- [ ] `PRAGMA journal_mode` 输出为 `wal`（data 目录在网络盘上时改为 `DELETE`）
+- [ ] 后台「操作日志」页能看到本次登录记录
 - [ ] `ENABLE_SCHEDULER=1`，且「每日日报」页能看到当天日报
 - [ ] NapCat 已部署，HTTP 服务端 Token 已填进 `NAPCAT_TOKEN`
 - [ ] 后台点「重推此日报」，QQ 群收到且徽标变「已推送」
+- [ ] 配了群内指令：NapCat 上报地址指向 `/api/v1/bot/onebot`，群里发「汇总」私聊能收到
 - [ ] 检查 `/health/ready` 返回 200

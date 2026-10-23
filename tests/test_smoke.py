@@ -73,6 +73,30 @@ def test_duplicate_record_rejected(client, clean_db, sample_image):
     assert second.get_json()["duplicate"] is True
 
 
+def test_same_paper_by_two_employees_allowed(client, clean_db, sample_image):
+    """两个员工同一天做同一篇稿子不该互相挡：去重键含 employee_name。
+
+    旧键 (work_date, author, title) 下，第二个人会被判"重复提交"，
+    白跑一次 PS 还拿不到记录。
+    """
+    first = _submit(client, sample_image)
+    assert first.status_code == 201
+
+    second = _submit(client, sample_image, employee_name="李四")
+    assert second.status_code == 201, second.get_data(as_text=True)
+    assert second.get_json()["data"]["employee_name"] == "李四"
+
+    # 同一个人重复提交仍然要拦
+    dup = _submit(client, sample_image)
+    assert dup.status_code == 409 and dup.get_json()["duplicate"] is True
+
+
+def test_same_employee_two_templates_allowed(client, clean_db, sample_image):
+    """同一员工同一天同一篇稿出两个期刊模板是合理业务，不能拦"""
+    assert _submit(client, sample_image, template_name="期刊A模板").status_code == 201
+    assert _submit(client, sample_image, template_name="期刊B模板").status_code == 201
+
+
 def test_missing_author_or_title(client, clean_db, sample_image):
     resp = _submit(client, sample_image, author="")
     assert resp.status_code == 400
@@ -121,7 +145,7 @@ def test_stats_daily(client, clean_db, sample_image):
     assert stats["by_employee"][0] == {"name": "张三", "count": 3}
 
 
-def test_viewer_cannot_write(app, clean_db, sample_image, admin_client):
+def test_viewer_cannot_write(app, clean_db, sample_image, admin_client, admin_csrf):
     """只读账号不能删记录、不能手动跑日报"""
     from server.app.db import db
     from server.app.models import AdminUser
@@ -144,12 +168,69 @@ def test_viewer_cannot_write(app, clean_db, sample_image, admin_client):
     assert c.get("/api/v1/records").status_code == 200
 
 
-def test_soft_delete_hides_from_list(admin_client, clean_db, sample_image):
+def test_delete_requires_csrf_token(admin_client, admin_csrf, clean_db, sample_image):
+    """会话写操作必须带 CSRF token，防止跨站冒用管理员会话"""
     record_id = _submit(admin_client, sample_image).get_json()["data"]["id"]
-    assert admin_client.delete(f"/api/v1/records/{record_id}").status_code == 200
+
+    # 不带 token：403，记录还在
+    assert admin_client.delete(f"/api/v1/records/{record_id}").status_code == 403
+    assert admin_client.get("/api/v1/records", headers=AUTH).get_json()["total"] == 1
+
+    # 带对 token：200
+    assert admin_client.delete(f"/api/v1/records/{record_id}", headers=admin_csrf).status_code == 200
+
+    # 带错 token：403
+    bad = _submit(admin_client, sample_image, author="王五", title="另一篇").get_json()["data"]["id"]
+    assert admin_client.delete(f"/api/v1/records/{bad}", headers={"X-CSRF-Token": "wrong"}).status_code == 403
+
+
+def test_soft_delete_hides_from_list(admin_client, admin_csrf, clean_db, sample_image):
+    record_id = _submit(admin_client, sample_image).get_json()["data"]["id"]
+    assert admin_client.delete(f"/api/v1/records/{record_id}", headers=admin_csrf).status_code == 200
 
     listing = admin_client.get("/api/v1/records", headers=AUTH).get_json()
     assert listing["total"] == 0
+
+
+def test_recycle_bin_restore(admin_client, admin_csrf, clean_db, sample_image):
+    """删除 → 回收站可见 → 恢复 → 重回列表；重复恢复 404"""
+    record_id = _submit(admin_client, sample_image).get_json()["data"]["id"]
+    assert admin_client.delete(f"/api/v1/records/{record_id}", headers=admin_csrf).status_code == 200
+
+    # 软删除记录仍可取详情与图片（回收站预览用）
+    assert admin_client.get(f"/api/v1/records/{record_id}").get_json()["ok"] is True
+
+    # 记录页渲染回收站
+    page = admin_client.get("/records").get_data(as_text=True)
+    assert "回收站" in page
+
+    # 恢复
+    resp = admin_client.post(f"/api/v1/records/{record_id}/restore", headers=admin_csrf)
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert admin_client.get("/api/v1/records", headers=AUTH).get_json()["total"] == 1
+
+    # 重复恢复：404
+    assert admin_client.post(f"/api/v1/records/{record_id}/restore", headers=admin_csrf).status_code == 404
+
+
+def test_restore_rejects_duplicate(admin_client, admin_csrf, clean_db, sample_image):
+    """恢复时若已存在同一天+同作者+同标题的未删除记录，409 不恢复"""
+    first = _submit(admin_client, sample_image).get_json()["data"]["id"]
+    assert admin_client.delete(f"/api/v1/records/{first}", headers=admin_csrf).status_code == 200
+    # 同一天同作者同标题再提交一条（走并发冲突之外的正常路径：先删后提）
+    second = _submit(admin_client, sample_image).get_json()["data"]["id"]
+    assert second != first
+
+    resp = admin_client.post(f"/api/v1/records/{first}/restore", headers=admin_csrf)
+    assert resp.status_code == 409
+    assert "无法恢复" in resp.get_json()["error"]
+
+
+def test_report_run_requires_csrf(admin_client, admin_csrf):
+    """手动跑日报同样受 CSRF 保护"""
+    assert admin_client.post("/api/v1/reports/run", json={}).status_code == 403
+    resp = admin_client.post("/api/v1/reports/run", headers=admin_csrf, json={"push": False})
+    assert resp.status_code == 200, resp.get_data(as_text=True)
 
 
 def test_pages_render(admin_client, clean_db, sample_image):
@@ -175,8 +256,59 @@ def test_daily_report_contains_numbers(app, clean_db, sample_image, client):
 
     content = build_daily_report(app, date.today())
     assert "总录用：1 条" in content
-    assert "张三：1 条" in content
+    assert "按员工" not in content  # 按需求已移除该段落
+    assert "· 示例合作伙伴：1 条" in content
+    assert "- 录用通知模板：1 条" in content
     assert "录用通知模板" in content
+
+
+def _wait_alert(calls, timeout_s=3.0):
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if calls:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_failed_record_triggers_instant_alert(app, clean_db, sample_image, client, monkeypatch):
+    """失败记录提交后立刻推告警（异步线程，不阻塞接口）"""
+    calls = []
+    monkeypatch.setattr("bot.report.push_alert", lambda content: calls.append(content) or (True, "ok"))
+
+    resp = _submit(client, sample_image, status="failed", error_message="Photoshop 未响应")
+    assert resp.status_code == 201
+
+    assert _wait_alert(calls), "失败告警没有被触发"
+    assert "Photoshop 未响应" in calls[0]
+    assert "张三" in calls[0]  # 员工名
+
+
+def test_success_record_does_not_alert(app, clean_db, sample_image, client, monkeypatch):
+    """成功记录不触发告警"""
+    calls = []
+    monkeypatch.setattr("bot.report.push_alert", lambda content: calls.append(content) or (True, "ok"))
+
+    resp = _submit(client, sample_image)
+    assert resp.status_code == 201
+
+    assert not _wait_alert(calls, timeout_s=0.5)
+
+
+def test_alert_disabled_by_config(app, clean_db, sample_image, client, monkeypatch):
+    """ALERT_ON_FAILURE=0 时连线程都不起"""
+    from server.app.config import Config
+
+    monkeypatch.setattr(Config, "ALERT_ON_FAILURE", False)
+    calls = []
+    monkeypatch.setattr("bot.report.push_alert", lambda content: calls.append(content) or (True, "ok"))
+
+    resp = _submit(client, sample_image, status="failed")
+    assert resp.status_code == 201
+
+    assert not _wait_alert(calls, timeout_s=0.5)
 
 
 def test_localtime_filter_converts_utc_to_config_tz(app):

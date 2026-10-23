@@ -17,14 +17,29 @@ export interface ClientConfig {
   auto_clear: boolean
   last_template_id: string
   last_partner: string
+  last_author: string
   partners: string[]
   template_dir: string
   author_placeholder: string
   title_placeholder: string
+  /** 成品图命名：author=作者.jpg / author_title=作者_标题.jpg */
+  filename_rule: string
   always_on_top: boolean
+  /** 贴边方向：left / right / top / 空（不贴边） */
   dock_side: string
+  /** 拖到屏幕边缘 24px 内松手自动贴边 */
+  auto_dock: boolean
+  /** 关闭主窗 = 隐藏到托盘（关掉则关闭即退出） */
+  close_to_tray: boolean
+  /** 主窗上次位置（-1 表示未记录） */
   win_x: number
   win_y: number
+  /** 记录窗 / 设置窗各自的位置记忆 */
+  history_win_x: number
+  history_win_y: number
+  settings_win_x: number
+  settings_win_y: number
+  theme: string
 }
 
 export interface TemplateItem {
@@ -72,6 +87,11 @@ export interface HistoryItem {
   status: string
   has_image: boolean
   created_at: string
+  error_message?: string
+  processing_ms?: number
+  client_machine?: string
+  ps_version?: string
+  image_filename?: string
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -104,7 +124,11 @@ export const api = {
       platform: string
       config: ClientConfig
       pending: number
+      dead: number
+      busy: boolean
       machine: string
+      version: string
+      log_dir: string
     }>('/status'),
 
   getConfig: () => request<{ ok: boolean; config: ClientConfig }>('/config'),
@@ -177,15 +201,27 @@ export const api = {
       `/export/status?task_id=${encodeURIComponent(taskId)}`,
     ),
 
-  history: () => request<{ ok: boolean; items: HistoryItem[]; error?: string }>('/history'),
+  history: (range: '7' | '30' | 'all' = '7') =>
+    request<{
+      ok: boolean
+      items: HistoryItem[]
+      total: number
+      range: string
+      size: number
+      error?: string
+    }>(`/history?range=${range}`),
 
-  imageUrl: (recordId: number, full = false) =>
-    `${BASE}/history/${recordId}/image${full ? '?full=1' : ''}`,
-
-  previewUrl: (path: string) => `${BASE}/preview?path=${encodeURIComponent(path)}`,
+  /** version 传 created_at 之类的稳定值：图片是可变资源，没版本号浏览器会一直重拉 */
+  imageUrl: (recordId: number, full = false, version: string | number = '') =>
+    `${BASE}/history/${recordId}/image${full ? '?full=1' : ''}${
+      version ? `${full ? '&' : '?'}v=${encodeURIComponent(String(version))}` : ''
+    }`,
 
   openFolder: (path: string) =>
     request<{ ok: boolean }>(`/open-folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+
+  openLogs: () =>
+    request<{ ok: boolean; path?: string; error?: string }>('/logs/open', { method: 'POST' }),
 
   flushQueue: () =>
     request<{ ok: boolean; sent: number; skipped: number; remaining: number; dead: number }>(

@@ -1,0 +1,44 @@
+# 绿联 NAS（UGOS Pro）/ 任意 Docker 主机部署 —— 服务端 + 日报推送
+#
+# 与 napcat 是同一个 NAS 上的两个独立项目。两者通过宿主机端口互通：
+# napcat 把容器的 3000 映射到宿主机 13000，
+# 本服务通过 host.docker.internal:13000 访问它（extra_hosts 负责把域名指向宿主机）。
+#
+# 数据全部在 ./data（数据库 / 成品图 / 日报 / 备份），备份这个目录即可。
+
+services:
+  server:
+    build: .
+    image: psluyong-lite:latest
+    container_name: psluyong-lite
+    # NAS 上挂载目录的属主通常不是 1000，容器内 appuser 会写不进去
+    # （报 PermissionError: /app/data/images）。用 root 运行避开这个问题。
+    user: "0:0"
+    # 启动前先把挂载进来的 data 目录权限放开，避免不同 NAS 的属主/ACL 差异
+    command: sh -lc "mkdir -p /app/data && chmod -R 777 /app/data 2>/dev/null || true; exec python -m server.run"
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      TZ: ${TZ:-Asia/Shanghai}
+    # 让容器内可以解析 host.docker.internal → 宿主机网关，
+    # 从而访问宿主机 13000 上跑的 NapCat HTTP 服务（Linux 上默认没有这个域名）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      # 镜像里没装 curl（精简版 Dockerfile 不跑 apt），用 python 自带 urllib 探活
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G

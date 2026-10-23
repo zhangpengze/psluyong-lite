@@ -42,3 +42,30 @@ def test_migration_is_idempotent(app):
     with app.app_context():
         assert run_migrations() == []
         assert run_migrations() == []
+
+
+def test_migration_drops_deprecated_dedup_index(app):
+    """老库的旧去重索引必须被删掉。
+
+    去重键从 (work_date, author, title) 放宽到带 employee_name 之后，
+    如果旧索引还留在库里，数据库仍然会按旧规则拦——表现为"代码明明改了，
+    线上还是 409"，最难查的那类问题。
+    """
+    with app.app_context():
+        db.session.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_records_date_author_title_active "
+                "ON records (work_date, author, title) WHERE is_deleted = 0"
+            )
+        )
+        db.session.commit()
+        assert "uq_records_date_author_title_active" in {
+            i["name"] for i in inspect(db.engine).get_indexes("records")
+        }
+
+        applied = run_migrations()
+
+        names = {i["name"] for i in inspect(db.engine).get_indexes("records")}
+        assert "uq_records_date_author_title_active" not in names
+        assert "uq_records_dedup_active" in names
+        assert "drop-index:uq_records_date_author_title_active" in applied

@@ -1,0 +1,32 @@
+# 无构建版本：不执行 docker build，因此不需要 Dockerfile，
+# 用来绕开 UGOS「项目里存的 Dockerfile 定义改不掉」的问题。
+#
+# 原理：直接拉官方 python:3.11-slim，把项目目录挂载进 /app，
+#       容器启动时先 pip install（走清华源），再启动服务。
+#
+# 代价：每次「重建容器」（不是重启）都会重新装一遍依赖，约 1~2 分钟。
+#       日常 restart 不会重装。
+
+services:
+  server:
+    image: python:3.11-slim
+    container_name: psluyong-lite
+    # NAS 挂载目录属主通常不是 1000，容器内 appuser 写不进去，用 root 运行
+    user: "0:0"
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -lc "pip install --no-cache-dir
+      -i https://pypi.tuna.tsinghua.edu.cn/simple
+      -r requirements.txt && python -m server.run"
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/app

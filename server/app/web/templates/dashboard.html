@@ -8,7 +8,9 @@
     <h1>仪表盘</h1>
     <div class="sub">{{ today }} · 今日录用与近 7 天趋势</div>
   </div>
-  <a class="btn ghost" href="{{ url_for('web.records') }}">查看全部记录</a>
+  <div class="actions">
+    <a class="btn ghost" href="{{ url_for('web.records') }}">查看全部记录</a>
+  </div>
 </div>
 
 <div class="grid grid-4">
@@ -22,11 +24,14 @@
     <div class="value">{{ today_stats.success }}</div>
     <div class="hint">成功率 {{ today_stats.success_rate }}%</div>
   </div>
-  <div class="kpi {{ 'red' if today_stats.failed else '' }}">
+  {# 失败数可点：直接跳到已筛好"今天 + 失败"的记录列表，省两步操作 #}
+  <a class="kpi {{ 'red' if today_stats.failed else '' }}"
+     href="{{ url_for('web.records', start=today, end=today, status='failed') }}"
+     aria-label="今日失败 {{ today_stats.failed }} 条，查看失败记录">
     <div class="label">今日失败</div>
     <div class="value">{{ today_stats.failed }}</div>
-    <div class="hint">{{ '需要关注' if today_stats.failed else '无失败记录' }}</div>
-  </div>
+    <div class="hint">{{ '点击查看失败明细' if today_stats.failed else '无失败记录' }}</div>
+  </a>
   <div class="kpi">
     <div class="label">今日活跃员工</div>
     <div class="value">{{ by_employee|length }}</div>
@@ -34,14 +39,17 @@
   </div>
 </div>
 
-<div class="grid grid-2" style="margin-top:14px">
+<div class="grid grid-2 mt-14">
   <div class="card">
     <h2>近 7 天录用趋势</h2>
-    <div class="spark">
+    <div class="spark" role="img"
+         aria-label="近 7 天每日录用条数：{% for p in series %}{{ p.date.strftime('%m-%d') }} {{ p.count }} 条{% if not loop.last %}，{% endif %}{% endfor %}">
       {% for p in series %}
         <div class="col" title="{{ p.date }} · {{ p.count }} 条">
           <div class="cnt">{{ p.count if p.count else '' }}</div>
-          <div class="bar {{ 'zero' if p.count == 0 }}" style="height: {{ (p.count / peak * 100)|round(1) }}%"></div>
+          <div class="bar-area">
+            <div class="bar {{ 'zero' if p.count == 0 }}" style="height: {{ (p.count / peak * 100)|round(1) }}%"></div>
+          </div>
           <div class="lbl">{{ p.date.strftime('%m-%d') }}</div>
         </div>
       {% endfor %}
@@ -103,37 +111,88 @@
   </div>
 </div>
 
-<div class="card" style="margin-top:14px">
+<div class="card mt-14">
   <h2>最近 8 条记录</h2>
   {% if recent %}
-    <table>
-      <thead>
-        <tr><th>图片</th><th>时间</th><th>员工</th><th>模板</th><th>合作伙伴</th><th>作者</th><th>标题</th><th>状态</th></tr>
-      </thead>
-      <tbody>
-        {% for r in recent %}
-          <tr>
-            <td>
-              {% if r.thumb_path %}
-                <img class="thumb" src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1) }}"
-                     onclick="openLightbox('{{ url_for('records.get_record_image', record_id=r.id) }}')" alt="">
-              {% else %}
-                <div class="noimg">无图</div>
-              {% endif %}
-            </td>
-            <td class="num">{{ r.created_at|localtime }}</td>
-            <td>{{ r.employee_name }}</td>
-            <td>{{ r.template_name }}</td>
-            <td>{{ r.partner_name or '-' }}</td>
-            <td>{{ r.author }}</td>
-            <td>{{ r.title }}</td>
-            <td><span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span></td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap short">
+      <table>
+        <caption class="sr-only">最近提交的 8 条录用记录</caption>
+        <thead>
+          <tr><th scope="col">图片</th><th scope="col">时间</th><th scope="col">员工</th>
+            <th scope="col">模板</th><th scope="col">合作伙伴</th><th scope="col">作者</th>
+            <th scope="col">标题</th><th scope="col">状态</th></tr>
+        </thead>
+        <tbody>
+          {% for r in recent %}
+            <tr>
+              <td>
+                {% if r.thumb_path or r.image_path %}
+                  <img class="thumb" loading="lazy" decoding="async" width="46" height="46"
+                       src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1 if r.thumb_path else 0) }}"
+                       data-full="{{ url_for('records.get_record_image', record_id=r.id) }}"
+                       data-alt="{{ r.author }}《{{ r.title }}》成品图"
+                       alt="预览 {{ r.author }}《{{ r.title }}》">
+                {% else %}
+                  <div class="noimg" role="img" aria-label="无图片">无图</div>
+                {% endif %}
+              </td>
+              <td class="num">{{ r.created_at|localtime }}</td>
+              <td>{{ r.employee_name }}</td>
+              <td>{{ r.template_name }}</td>
+              <td>{{ r.partner_name or '-' }}</td>
+              <td>{{ r.author }}</td>
+              <td class="clip" title="{{ r.title }}">{{ r.title }}</td>
+              <td><span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
-    <div class="empty">还没有任何记录。员工客户端生成后会自动出现在这里。</div>
+    <div class="empty">
+      <div class="empty-title">还没有任何记录</div>
+      <div>员工客户端生成后会自动出现在这里</div>
+    </div>
   {% endif %}
+</div>
+
+{# 系统自身状态：业务指标再好看，备份挂了 / 日报没推 / 磁盘塞满也是白搭 #}
+<div class="card mt-14">
+  <div class="statusbar" role="status" aria-label="系统状态">
+    <span class="item">
+      <span class="dot {{ 'bad' if not system.last_backup else ('warn' if system.last_backup.stale else 'ok') }}" aria-hidden="true"></span>
+      {% if system.last_backup %}
+        最后备份 {{ system.last_backup.age_text }}（{{ system.last_backup.at_text }} · 共 {{ system.last_backup.count }} 份）
+      {% else %}
+        还没有数据库备份，建议先跑一次 <code>python -m server.backup</code>
+      {% endif %}
+    </span>
+
+    <span class="sep" aria-hidden="true">|</span>
+
+    <span class="item">
+      {% if system.yesterday_push %}
+        <span class="dot {{ 'ok' if system.yesterday_push.pushed else 'bad' }}" aria-hidden="true"></span>
+        {{ system.yesterday_push.date }} 日报{{ '已推送' if system.yesterday_push.pushed else '推送失败' }}
+        {% if not system.yesterday_push.pushed and system.yesterday_push.message %}
+          <span class="muted" title="{{ system.yesterday_push.message }}">· {{ system.yesterday_push.message }}</span>
+        {% endif %}
+      {% else %}
+        <span class="dot warn" aria-hidden="true"></span>
+        {{ yesterday }} 日报没有推送记录
+      {% endif %}
+    </span>
+
+    <span class="sep" aria-hidden="true">|</span>
+
+    <span class="item">
+      <span class="dot ok" aria-hidden="true"></span>
+      图片 {{ system.image_count }} 张 · {{ system.image_bytes|filesize }}
+    </span>
+
+    <span class="sep" aria-hidden="true">|</span>
+
+    <a href="{{ url_for('web.audit') }}">操作日志</a>
+  </div>
 </div>
 {% endblock %}

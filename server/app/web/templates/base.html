@@ -3,52 +3,97 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="csrf-token" content="{{ csrf_token() }}">
 <title>{% block title %}工作台{% endblock %} · 期刊录用管理系统</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css', v=asset_version()) }}">
+{# 主题预设必须内联在 head：否则样式表先按亮色渲染一帧，切暗色时会白闪。
+   等内联脚本全部外置后再改成 nonce + CSP。 #}
+<script>
+try {
+  var t = localStorage.getItem('psluyong-theme');
+  if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+} catch (e) {}
+</script>
 </head>
 <body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">期刊录用管理<small>PS 模板批量生成 · 工作日志</small></div>
-    <a href="{{ url_for('web.dashboard') }}" class="{{ 'active' if active == 'dashboard' }}">仪表盘</a>
-    <a href="{{ url_for('web.records') }}" class="{{ 'active' if active == 'records' }}">录用记录</a>
-    <a href="{{ url_for('web.reports') }}" class="{{ 'active' if active == 'reports' }}">每日日报</a>
+
+    <nav aria-label="主导航">
+      <a href="{{ url_for('web.dashboard') }}" class="{{ 'active' if active == 'dashboard' }}"
+         {% if active == 'dashboard' %}aria-current="page"{% endif %}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        仪表盘
+      </a>
+      <a href="{{ url_for('web.records') }}" class="{{ 'active' if active == 'records' }}"
+         {% if active == 'records' %}aria-current="page"{% endif %}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        录用记录
+      </a>
+      <a href="{{ url_for('web.reports') }}" class="{{ 'active' if active == 'reports' }}"
+         {% if active == 'reports' %}aria-current="page"{% endif %}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/></svg>
+        每日日报
+      </a>
+      <a href="{{ url_for('web.audit') }}" class="{{ 'active' if active == 'audit' }}"
+         {% if active == 'audit' %}aria-current="page"{% endif %}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        操作日志
+      </a>
+    </nav>
+
     <div class="spacer"></div>
+
+    <button type="button" class="theme-btn" id="theme-toggle" aria-label="切换主题">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+      <span class="theme-label">主题：跟随系统</span>
+    </button>
+
     {% if me %}
       <div class="who">{{ me.username }}{% if me.is_admin %} · 管理员{% else %} · 只读{% endif %}</div>
       <a href="{{ url_for('web.logout') }}">退出登录</a>
     {% endif %}
   </aside>
 
-  <main class="main">
+  <main class="main" id="main">
     {% with messages = get_flashed_messages(with_categories=true) %}
-      {% for category, message in messages %}
-        <div class="flash {{ category }}">{{ message }}</div>
-      {% endfor %}
+      {% if messages %}
+        <div role="status" aria-live="polite">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
 </div>
 
-<div class="lightbox" id="lightbox">
-  <span class="close" onclick="closeLightbox()">&times;</span>
-  <img id="lightbox-img" alt="原图">
+{# 灯箱：role=dialog + aria-modal，键盘可关（Esc / 关闭按钮） #}
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="成品图预览" aria-hidden="true">
+  <button type="button" class="close" data-close-overlay aria-label="关闭预览">&times;</button>
+  <img id="lightbox-img" alt="">
 </div>
 
-<script>
-function openLightbox(src) {
-  document.getElementById('lightbox-img').src = src;
-  document.getElementById('lightbox').classList.add('open');
-}
-function closeLightbox() {
-  document.getElementById('lightbox').classList.remove('open');
-  document.getElementById('lightbox-img').src = '';
-}
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
-document.getElementById('lightbox').addEventListener('click', e => {
-  if (e.target.id === 'lightbox') closeLightbox();
-});
-</script>
+{# 确认弹窗：替代原生 confirm，Promise 化后调用方写法几乎不变 #}
+<div class="modal" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-hidden="true">
+  <div class="modal-card">
+    <h2 id="confirm-title" data-modal-title>请确认</h2>
+    <p data-modal-message></p>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-modal-cancel>取消</button>
+      <button type="button" class="btn danger" data-modal-ok data-autofocus>确认</button>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='toast.js', v=asset_version()) }}"></script>
+<script src="{{ url_for('static', filename='ui.js', v=asset_version()) }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

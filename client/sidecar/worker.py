@@ -78,12 +78,38 @@ def _release_ps_lock(fh) -> None:
         fh.close()
 
 
+def attach_file_logger(filename: str, max_bytes: int = 2 * 1024 * 1024, backups: int = 3) -> None:
+    """把日志同时写进 %APPDATA%/psluyong-lite/logs/。
+
+    打包后 sidecar / worker 的 stdout、stderr 都被 Tauri 丢进 DEVNULL
+    （员工不该看到黑框），不落文件的话，员工报"生成失败"时手里一份日志都没有。
+    """
+    from logging.handlers import RotatingFileHandler
+
+    from .config import app_data_dir
+
+    try:
+        log_dir = app_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            log_dir / filename, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        )
+        logging.getLogger().addHandler(handler)
+        logging.getLogger(__name__).info("日志已落盘 %s", log_dir / filename)
+    except OSError as e:  # 磁盘满/无权限都不该挡住主流程
+        logging.getLogger(__name__).warning("日志文件不可写，仅输出到控制台: %s", e)
+
+
 def run(task_dir: Path) -> None:
     """worker 主流程：读参数 -> 抢锁 -> 驱动 PS -> 写终态"""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [worker] %(message)s",
     )
+    attach_file_logger("worker.log")
     task_dir = Path(task_dir)
     # PS 硬崩溃时 Python 拦不到，faulthandler 把现场写进文件，事后有据可查
     crash_log = open(task_dir / "crash.log", "w", encoding="utf-8")
@@ -125,6 +151,7 @@ def run(task_dir: Path) -> None:
                 author_placeholder=params.get("author_placeholder") or "{{作者}}",
                 title_placeholder=params.get("title_placeholder") or "{{标题}}",
                 ps_path=params.get("ps_path", ""),
+                filename_rule=params.get("filename_rule") or "author_title",
             )
         )
         write_json_atomic(

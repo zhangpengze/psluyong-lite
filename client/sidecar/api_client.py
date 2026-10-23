@@ -82,9 +82,27 @@ class ApiClient:
             return False
 
     # ========== 历史 ==========
-    def list_records(self, employee: str, size: int = 50) -> list[dict]:
-        params = {"size": size, "employee": employee} if employee else {"size": size}
-        return self._request("GET", "/api/v1/records", params=params).get("items", [])
+    def list_records(
+        self, employee: str, size: int = 60, start: str = "", end: str = ""
+    ) -> dict:
+        """返回 {items, total}。
+
+        服务端列表接口默认只查「今天往前 7 天」，不传 start/end 就永远
+        看不到更早的记录——客户端必须显式指定区间，否则界面上的"累计"
+        其实是"最近 7 天"（真实误导）。
+        """
+        params: dict[str, Any] = {"size": size}
+        if employee:
+            params["employee"] = employee
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        payload = self._request("GET", "/api/v1/records", params=params)
+        return {
+            "items": payload.get("items", []),
+            "total": int(payload.get("total") or 0),
+        }
 
     def fetch_image(self, record_id: int, thumb: bool = True) -> bytes:
         """浏览器里 <img> 带不了 API Key，所以由 sidecar 代取再转出去"""

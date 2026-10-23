@@ -8,6 +8,7 @@ worker 文件协议本身的真实性由 test_executor.py 用真子进程覆盖�
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 import time
@@ -107,6 +108,7 @@ class FakeClient:
     def __init__(self, fail_status: int | None = None):
         self.fail_status = fail_status
         self.submitted: list[dict] = []
+        self.list_calls: list[tuple] = []
 
     def health(self):
         return self.fail_status is None
@@ -116,6 +118,10 @@ class FakeClient:
             raise ServerError("服务器炸了", self.fail_status)
         self.submitted.append({"fields": fields, "image": str(image_path) if image_path else None})
         return {"id": len(self.submitted)}
+
+    def list_records(self, employee, size=60, start="", end=""):
+        self.list_calls.append((employee, size, start, end))
+        return {"items": [{"id": 1, "author": "李四", "title": "深度学习"}], "total": 42}
 
 
 def test_status_endpoint(sc, configured, monkeypatch):
@@ -240,16 +246,11 @@ def test_export_uncertain_when_worker_crashes(sc, configured, monkeypatch):
     assert fake.submitted == []
 
 
-def test_preview_blocks_path_traversal(sc, configured, tmp_path):
-    outside = tmp_path.parent / "secret.jpg"
-    outside.write_bytes(b"secret")
-
-    resp = sc.get("/preview", query_string={"path": str(outside)})
-    assert resp.status_code == 403
-
+def test_preview_endpoint_removed(sc, configured, tmp_path):
+    """成品预览灯箱已下线，配套的本地图片读取接口不再暴露（避免任意文件读取面）"""
     inside = tmp_path / "ok.jpg"
     inside.write_bytes(b"ok")
-    assert sc.get("/preview", query_string={"path": str(inside)}).status_code == 200
+    assert sc.get("/preview", query_string={"path": str(inside)}).status_code in (404, 405)
 
 
 # ========== 本机模板（员工上传，不经服务器）==========
@@ -368,3 +369,199 @@ def test_normalize_path_collapses_duplicate_separators():
     assert _normalize_path("E:/psluyong-lite//out") == "E:/psluyong-lite/out"
     assert _normalize_path(r"\\nas\share\\dir") == r"\\nas\share\\dir"  # UNC 原样保留
     assert _normalize_path("") == ""
+
+
+# ========== 记录日期与历史区间 ==========
+def test_export_carries_generation_date(sc, configured, monkeypatch):
+    """生成当天的日期随记录上报：离线隔天补传不能算到补传那天"""
+    from datetime import date
+
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    _stub_worker(monkeypatch)
+
+    start = sc.post(
+        "/export", json={"template_id": "tpl-1.psd", "author": "李四", "title": "深度学习"}
+    ).get_json()
+    _poll_final(sc, start["task_id"])
+
+    assert fake.submitted[0]["fields"]["work_date"] == date.today().isoformat()
+
+
+def test_history_range_drives_window_and_total(sc, configured, monkeypatch):
+    """服务端默认只给近 7 天：客户端必须显式传区间，并把 total 透传上去"""
+    from datetime import date, timedelta
+
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    today = date.today()
+
+    data = sc.get("/history?range=30").get_json()
+    assert data["total"] == 42, "total 要透传，否则界面只能显示本页条数"
+    employee, size, start, end = fake.list_calls[-1]
+    assert employee == "张三"
+    assert start == (today - timedelta(days=29)).isoformat()
+    assert end == today.isoformat()
+
+    sc.get("/history?range=all")
+    assert fake.list_calls[-1][2] == "2000-01-01", "全部区间要绕开服务端默认的 7 天窗口"
+
+    sc.get("/history?range=abc")
+    assert fake.list_calls[-1][2] == (today - timedelta(days=6)).isoformat(), "非法值回退近 7 天"
+
+
+# ========== 记录日期与历史区间 ==========
+def test_export_carries_generation_date(sc, configured, monkeypatch):
+    """生成当天的日期随记录上报：离线隔天补传不能算到补传那天"""
+    from datetime import date
+
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    _stub_worker(monkeypatch)
+
+    start = sc.post(
+        "/export", json={"template_id": "tpl-1.psd", "author": "李四", "title": "深度学习"}
+    ).get_json()
+    _poll_final(sc, start["task_id"])
+
+    assert fake.submitted[0]["fields"]["work_date"] == date.today().isoformat()
+
+
+def test_history_range_drives_window_and_total(sc, configured, monkeypatch):
+    """服务端默认只给近 7 天：客户端必须显式传区间，并把 total 透传上去"""
+    from datetime import date, timedelta
+
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    today = date.today()
+
+    data = sc.get("/history?range=30").get_json()
+    assert data["total"] == 42, "total 要透传，否则界面只能显示本页条数"
+    employee, size, start, end = fake.list_calls[-1]
+    assert employee == "张三"
+    assert start == (today - timedelta(days=29)).isoformat()
+    assert end == today.isoformat()
+
+    sc.get("/history?range=all")
+    assert fake.list_calls[-1][2] == "2000-01-01", "全部区间要绕开服务端默认的 7 天窗口"
+
+    sc.get("/history?range=abc")
+    assert fake.list_calls[-1][2] == (today - timedelta(days=6)).isoformat(), "非法值回退近 7 天"
+
+
+def test_cross_site_write_rejected(sc, configured):
+    """带外站 Origin 的写请求必须 403：CORS 挡不住请求被执行"""
+    evil = sc.post("/config", json={"employee_name": "黑客"}, headers={"Origin": "http://evil.example"})
+    assert evil.status_code == 403
+    assert load_config().employee_name == "张三", "被拒的请求不能改到配置"
+
+    ok = sc.post("/config", json={"employee_name": "李四"}, headers={"Origin": "tauri://localhost"})
+    assert ok.status_code == 200
+    assert load_config().employee_name == "李四"
+
+    # 本机程序（curl / worker）不带 Origin，要放行
+    assert sc.post("/config", json={"employee_name": "王五"}).status_code == 200
+
+
+def test_cross_site_read_is_not_rejected(sc, configured, monkeypatch):
+    """只拦写：GET 不拦（读的是本机自己的数据，且白名单响应头已挡住外站读取）"""
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    assert sc.get("/status", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+def test_cross_site_write_rejected(sc, configured):
+    """带外站 Origin 的写请求必须 403：CORS 挡不住请求被执行"""
+    evil = sc.post("/config", json={"employee_name": "黑客"}, headers={"Origin": "http://evil.example"})
+    assert evil.status_code == 403
+    assert load_config().employee_name == "张三", "被拒的请求不能改到配置"
+
+    ok = sc.post("/config", json={"employee_name": "李四"}, headers={"Origin": "tauri://localhost"})
+    assert ok.status_code == 200
+    assert load_config().employee_name == "李四"
+
+    # 本机程序（curl / worker）不带 Origin，要放行
+    assert sc.post("/config", json={"employee_name": "王五"}).status_code == 200
+
+
+def test_cross_site_read_is_not_rejected(sc, configured, monkeypatch):
+    """只拦写：GET 不拦（读的是本机自己的数据，且白名单响应头已挡住外站读取）"""
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    assert sc.get("/status", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+# ========== 版本与诊断 ==========
+def test_status_exposes_version_and_log_dir(sc, configured, monkeypatch):
+    """员工报障时靠这两个字段确认装的哪一版、日志在哪"""
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    data = sc.get("/status").get_json()
+
+    assert data["version"] == sidecar_server.__version__
+    assert data["log_dir"].endswith("logs")
+
+
+def test_open_log_dir_uses_fixed_path(sc, configured, monkeypatch):
+    """日志目录由服务端固定，不接受参数——不能变成任意目录打开器"""
+    import os
+
+    from client.sidecar.config import app_data_dir
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+
+    assert sc.post("/logs/open").get_json()["ok"] is True
+    assert opened == [str(app_data_dir() / "logs")]
+
+
+# ========== 版本与诊断 ==========
+def test_status_exposes_version_and_log_dir(sc, configured, monkeypatch):
+    """员工报障时靠这两个字段确认装的哪一版、日志在哪"""
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    data = sc.get("/status").get_json()
+
+    assert data["version"] == sidecar_server.__version__
+    assert data["log_dir"].endswith("logs")
+
+
+def test_open_log_dir_uses_fixed_path(sc, configured, monkeypatch):
+    """日志目录由服务端固定，不接受参数——不能变成任意目录打开器"""
+    import os
+
+    from client.sidecar.config import app_data_dir
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+
+    assert sc.post("/logs/open").get_json()["ok"] is True
+    assert opened == [str(app_data_dir() / "logs")]
+
+
+# ========== 成品图命名规则 ==========
+def _export_params(sc, configured, monkeypatch) -> dict:
+    """跑一次假生成，取 worker 实际读到的 params.json"""
+    from client.sidecar.config import app_data_dir
+
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    _stub_worker(monkeypatch)
+
+    start = sc.post(
+        "/export", json={"template_id": "tpl-1.psd", "author": "李四", "title": "深度学习"}
+    ).get_json()
+    task_dir = app_data_dir() / "executions" / start["task_id"]
+    params = json.loads((task_dir / "params.json").read_text(encoding="utf-8"))
+    _poll_final(sc, start["task_id"])  # 收尾，别留后台 worker
+    return params
+
+
+def test_export_passes_filename_rule(sc, configured, monkeypatch):
+    """设置里选的命名规则要一路传到 worker"""
+    sc.post("/config", json={"filename_rule": "author"})
+
+    assert _export_params(sc, configured, monkeypatch)["filename_rule"] == "author"
+
+
+def test_export_bad_filename_rule_falls_back(sc, configured, monkeypatch):
+    """脏配置在 sidecar 收口，不把非法值传进 worker"""
+    sc.post("/config", json={"filename_rule": "../../evil"})
+
+    assert _export_params(sc, configured, monkeypatch)["filename_rule"] == "author_title"

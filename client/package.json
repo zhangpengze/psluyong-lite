@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --port 5173",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
@@ -17,7 +19,11 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
     "@vitejs/plugin-vue": "^5.0.4",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^21.0.4",
     "typescript": "^5.4.5",
-    "vite": "^5.2.11"
+    "vite": "^5.2.11",
+    "vitest": "^2.1.9",
+    "vue-tsc": "^2.2.12"
   }
 }

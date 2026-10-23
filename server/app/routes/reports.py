@@ -7,7 +7,8 @@ from datetime import date, datetime
 
 from flask import Blueprint, current_app, jsonify, request
 
-from ..auth import admin_required, api_or_session
+from ..audit import log_action
+from ..auth import admin_required, api_or_session, csrf_protect
 
 bp = Blueprint("reports_api", __name__, url_prefix="/api/v1/reports")
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def preview():
 
 @bp.post("/run")
 @admin_required
+@csrf_protect
 def run():
     """手动生成并推送（补跑某天日报时用）"""
     from bot.report import run_daily
@@ -45,4 +47,9 @@ def run():
 
     result = run_daily(current_app, day, push=push)
     logger.info("手动触发日报 date=%s push=%s result=%s", day, push, result["message"])
+    log_action(
+        "push_report" if push else "run_report",
+        target=day.isoformat(),
+        detail=result["message"],
+    )
     return jsonify({"ok": True, **result})

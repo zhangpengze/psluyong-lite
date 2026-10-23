@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 # 允许从 client/sidecar 直接运行：把仓库根加进 sys.path 才能 import core
@@ -24,8 +25,9 @@ if str(_REPO_ROOT) not in sys.path:
 from flask import Flask, jsonify, request, send_file  # noqa: E402
 
 from core.ps_connector import COM_AVAILABLE  # noqa: E402
+from core.runner import DEFAULT_FILENAME_RULE, FILENAME_RULES  # noqa: E402
 
-from . import queue  # noqa: E402
+from . import __version__, queue  # noqa: E402
 from .api_client import ApiClient, ServerError  # noqa: E402
 from .config import ClientConfig, ensure_dirs, load_config, save_config, template_dir_of  # noqa: E402
 from .executor import BusyError, Executor  # noqa: E402
@@ -120,6 +122,27 @@ def _ensure_template(cfg: ClientConfig, template_id: str) -> tuple[Path, dict]:
     return template_dir_of(cfg) / template["filename"], template
 
 
+def _ensure_output_dir(cfg: ClientConfig) -> Path:
+    """生成前预检输出目录：相对路径/不可写在这里就拦下来。
+
+    不预检的代价：PS 白跑一轮 COM，最后报一句「文件不存在」，
+    员工根本想不到是设置里的输出目录填错了（真实踩坑：填了「姓名」）。
+    """
+    raw = (cfg.output_dir or "").strip()
+    if not raw:
+        raise ServerError("输出目录未设置，请到设置里填写")
+    target = Path(raw)
+    if not target.is_absolute():
+        raise ServerError(
+            f"输出目录「{raw}」不是完整路径（应以盘符如 D:\\ 开头），请在设置里修正"
+        )
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ServerError(f"输出目录「{raw}」不可用：{e}，请在设置里修正") from None
+    return target
+
+
 def _ps_version(ps_path: str) -> str:
     """读 Photoshop.exe 的文件版本，读不到就留空（不影响生成）"""
     if not ps_path or not os.path.exists(ps_path):
@@ -158,7 +181,9 @@ def _submit_fields(cfg: ClientConfig, fields: dict, image_path_str: str, success
     except ServerError as e:
         upload_message = e.message
         if e.status == 409:
-            upload_message = "服务器提示：今天已录入过同一作者+标题"
+            # 直接透传服务端文案。判重规则会变（比如键里加上模板名），
+            # 客户端硬编码一份迟早和服务端对不上，员工看到的原因就是错的。
+            upload_message = f"服务器提示：{e.message}"
         else:
             queue.enqueue(fields, str(image_path) if image_path else None)
             queued = True
@@ -203,6 +228,23 @@ def create_sidecar() -> Flask:
             resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
         return resp
 
+    @app.before_request
+    def reject_cross_site_writes():
+        """写操作自己判来源。
+
+        CORS 只约束"能不能读响应"，约束不了"请求是否被执行"——恶意网页用
+        form 提交（无需预检）照样能让本机 sidecar 改配置、打开目录。
+        带 Origin 的写请求必须在白名单里；不带 Origin 的是本机程序（curl、
+        PowerShell、Tauri 内部），放行。
+        """
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        origin = request.headers.get("Origin")
+        if origin and origin not in ALLOWED_ORIGINS:
+            logger.warning("拒绝跨站写请求 origin=%s path=%s", origin, request.path)
+            return jsonify({"ok": False, "error": "请求来源不被允许"}), 403
+        return None
+
     @app.route("/<path:_any>", methods=["OPTIONS"])
     def preflight(_any):
         return ("", 204)
@@ -216,6 +258,8 @@ def create_sidecar() -> Flask:
     def status():
         cfg = load_config()
         client = _client(cfg)
+        from .config import app_data_dir
+
         return jsonify(
             {
                 "ok": True,
@@ -227,6 +271,9 @@ def create_sidecar() -> Flask:
                 "dead": len(queue.dead_letters()),
                 "machine": platform.node(),
                 "busy": executor.running_task() is not None,
+                # 版本与日志路径：员工报障时直接复制走，不用再问"你装的哪版"
+                "version": __version__,
+                "log_dir": str(app_data_dir() / "logs"),
             }
         )
 
@@ -374,6 +421,7 @@ def create_sidecar() -> Flask:
         # 1) 解析本机模板路径（模板归员工本机管，不再从服务器下载）
         try:
             template_file, template = _ensure_template(cfg, template_id)
+            _ensure_output_dir(cfg)
         except ServerError as e:
             return jsonify({"ok": False, "error": e.message}), 200
 
@@ -387,7 +435,14 @@ def create_sidecar() -> Flask:
             "jpg_quality": cfg.jpg_quality,
             "author_placeholder": cfg.author_placeholder or "{{作者}}",
             "title_placeholder": cfg.title_placeholder or "{{标题}}",
+            # 命名规则在这里收口：非法值一律回落到默认，别把脏配置传进 worker
+            "filename_rule": cfg.filename_rule
+            if cfg.filename_rule in FILENAME_RULES
+            else DEFAULT_FILENAME_RULE,
             "ps_path": cfg.ps_path,
+            # 生成当天的日期：离线记录可能隔天才补传，服务端不给就用补传当天，
+            # 日报/统计会把它算到错误的一天
+            "work_date": date.today().isoformat(),
             # 以下仅用于任务完成后上报，worker 不读
             "template_id": template["id"],
             "template_name": template["name"],
@@ -449,6 +504,7 @@ def create_sidecar() -> Flask:
     def _record_fields(cfg: ClientConfig, task_dir: Path, status: dict, error_message: str) -> dict:
         params = read_json(task_dir / "params.json") or {}
         return {
+            "work_date": params.get("work_date", ""),
             "employee_name": params.get("employee_name") or cfg.employee_name,
             "template_id": params.get("template_id", ""),
             "template_name": params.get("template_name", ""),
@@ -464,16 +520,43 @@ def create_sidecar() -> Flask:
         }
 
     # ========== 历史（客户端只看自己的）==========
+    # 服务端列表接口默认区间是「今天往前 7 天」，客户端要自己声明区间，
+    # 否则「累计记录」会缩水成「最近 7 天」。
+    HISTORY_RANGES = {"7": 7, "30": 30, "all": 0}
+    HISTORY_ALL_START = "2000-01-01"
+
     @app.get("/history")
     def history():
         cfg = load_config()
         if not cfg.employee_name:
-            return jsonify({"ok": True, "items": []})
+            return jsonify({"ok": True, "items": [], "total": 0, "range": "7"})
+
+        raw_range = str(request.args.get("range") or "7")
+        if raw_range not in HISTORY_RANGES:
+            raw_range = "7"
+        days = HISTORY_RANGES[raw_range]
+        today = date.today()
+        start = HISTORY_ALL_START if days == 0 else (today - timedelta(days=days - 1)).isoformat()
+        # 全部区间多给一些条数，前 7 天这种小范围没必要拉满
+        size = 200 if days == 0 else 60
+
         try:
-            items = _client(cfg).list_records(cfg.employee_name, size=60)
-            return jsonify({"ok": True, "items": items})
+            data = _client(cfg).list_records(
+                cfg.employee_name, size=size, start=start, end=today.isoformat()
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "items": data["items"],
+                    "total": data["total"],
+                    "range": raw_range,
+                    "size": size,
+                }
+            )
         except ServerError as e:
-            return jsonify({"ok": False, "error": e.message, "items": []}), 200
+            return jsonify(
+                {"ok": False, "error": e.message, "items": [], "total": 0, "range": raw_range}
+            ), 200
 
     @app.get("/history/<int:record_id>/image")
     def history_image(record_id: int):
@@ -484,26 +567,13 @@ def create_sidecar() -> Flask:
             content = _client(cfg).fetch_image(record_id, thumb=request.args.get("full") != "1")
         except ServerError as e:
             return jsonify({"ok": False, "error": e.message}), e.status or 404
-        return Response(content, mimetype="image/jpeg")
+        resp = Response(content, mimetype="image/jpeg")
+        # 图片是可变资源（同一条记录可能被重新生成/管理员替换），前端带 ?v=created_at
+        # 做版本区分；这里只是允许浏览器缓存，避免每次进记录页都重拉几十张缩略图
+        resp.headers["Cache-Control"] = "private, max-age=86400"
+        return resp
 
-    # ========== 本地图片预览 ==========
-    @app.get("/preview")
-    def preview():
-        cfg = load_config()
-        raw = request.args.get("path", "")
-        if not raw:
-            return jsonify({"ok": False, "error": "缺少 path"}), 400
-
-        output_root = Path(cfg.output_dir).resolve()
-        target = Path(raw).resolve()
-        # 只允许读输出目录内的文件，防路径穿越
-        if output_root not in target.parents and target != output_root:
-            return jsonify({"ok": False, "error": "非法路径"}), 403
-        if not target.exists():
-            return jsonify({"ok": False, "error": "文件不存在"}), 404
-
-        return send_file(target, conditional=True)
-
+    # ========== 打开目录 / 日志 ==========
     @app.post("/open-folder")
     def open_folder():
         """生成后"打开文件夹"按钮"""
@@ -520,6 +590,24 @@ def create_sidecar() -> Flask:
             return jsonify({"ok": True})
         except OSError as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+
+    @app.post("/logs/open")
+    def open_log_dir():
+        """打开日志目录：路径由服务端固定，不接受参数（免得变成任意目录打开器）"""
+        from .config import app_data_dir
+
+        log_dir = app_data_dir() / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"无法创建日志目录：{e}"}), 200
+        if sys.platform != "win32":
+            return jsonify({"ok": False, "error": "仅 Windows 支持"}), 200
+        try:
+            os.startfile(log_dir)  # type: ignore[attr-defined]
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"打开失败：{e}"}), 200
+        return jsonify({"ok": True, "path": str(log_dir)})
 
     # ========== 离线队列 ==========
     @app.get("/queue")
@@ -550,6 +638,13 @@ def create_sidecar() -> Flask:
     return app
 
 
+def _attach_file_logger(filename: str) -> None:
+    """sidecar 自己的日志落盘（实现与 worker 共用，避免两份格式化逻辑）"""
+    from .worker import attach_file_logger
+
+    attach_file_logger(filename)
+
+
 def main() -> None:
     # PyInstaller 打包后 worker 由同一个 exe 以 --run-worker 方式拉起
     if "--run-worker" in sys.argv:
@@ -559,6 +654,7 @@ def main() -> None:
         run(Path(sys.argv[idx + 1]))
         return
 
+    _attach_file_logger("sidecar.log")
     port = int(os.getenv("SIDECAR_PORT", "8765"))
     app = create_sidecar()
     logger.info("sidecar 启动 http://127.0.0.1:%s", port)

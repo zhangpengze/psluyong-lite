@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, current_app, jsonify
 from sqlalchemy import text
 
 from ..db import db
@@ -23,4 +23,6 @@ def ready():
         db.session.execute(text("SELECT 1"))
         return jsonify({"ok": True, "status": "ready", "db": "ok"})
     except Exception as e:  # noqa: BLE001
-        return jsonify({"ok": False, "status": "not_ready", "db": str(e)}), 503
+        # 异常原文（表名、路径、SQL）只进日志，不回给调用方
+        current_app.logger.exception("就绪探针失败: %s", e)
+        return jsonify({"ok": False, "status": "not_ready", "db": "error"}), 503

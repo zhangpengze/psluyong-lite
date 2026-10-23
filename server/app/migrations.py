@@ -24,9 +24,25 @@ from .db import db
 
 logger = logging.getLogger(__name__)
 
+# 已经废弃、必须从老库里删掉的索引。
+#
+# create_all 只建"缺失的"，不会删多余的；模型里改了索引名，老库会同时
+# 保留旧索引——旧规则继续拦数据，表现为"代码明明改了，线上还是 409"。
+# 只删我们自己命名的索引，SQLite 自动索引（sqlite_autoindex_*）不碰。
+_DEPRECATED_INDEXES: dict[str, tuple[str, ...]] = {
+    # 去重键两次调整：(work_date, author, title)
+    #   → (work_date, employee_name, author, title)
+    #   → (work_date, employee_name, template_name, author, title)
+    # 老库这两个历史索引都要删，否则旧规则继续拦数据。
+    "records": (
+        "uq_records_date_author_title_active",
+        "uq_records_date_employee_author_title_active",
+    ),
+}
+
 
 def run_migrations() -> list[str]:
-    """补列 + 补索引，返回执行过的变更清单（供测试与日志）"""
+    """补列 + 补索引 + 删废弃索引，返回执行过的变更清单（供测试与日志）"""
     db.create_all()  # 先建缺失的表，已有表保持原样
 
     engine = db.engine
@@ -50,6 +66,16 @@ def run_migrations() -> list[str]:
                 logger.warning("老库补列 %s.%s（代码比库新，属正常升级）", table.name, col.name)
 
         existing_indexes = {i["name"] for i in inspector.get_indexes(table.name)}
+
+        for name in _DEPRECATED_INDEXES.get(table.name, ()):
+            if name not in existing_indexes:
+                continue
+            with engine.begin() as conn:
+                conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+            existing_indexes.discard(name)
+            applied.append(f"drop-index:{name}")
+            logger.warning("老库删除废弃索引 %s（去重规则已变更）", name)
+
         with engine.begin() as conn:
             for idx in table.indexes:
                 if idx.name in existing_indexes:

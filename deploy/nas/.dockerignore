@@ -1,0 +1,12 @@
+# 运行时数据不进构建上下文：镜像里不需要，data 由 volume 挂到 /app/data
+data/
+
+# 缓存与字节码
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+
+# 本地杂物
+*.log
+.DS_Store

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
@@ -34,8 +35,50 @@ def create_app(config_object: type = Config) -> Flask:
 
     _register_filters(app)
     _register_error_handlers(app)
+    _register_security_headers(app)
     _register_cli(app)
     return app
+
+
+def _asset_version(app: Flask) -> str:
+    """静态资源版本号：取 static 目录里最新 mtime 的短哈希。
+
+    改完 app.css 直接刷新就能看到新样式，不用叮嘱用户 Ctrl+F5；
+    内容没变时 URL 也不变，浏览器缓存继续命中。
+
+    做成函数而不是启动时算一次的常量：开发时改了 CSS 不重启也能生效。
+    static 目录只有几个文件，每次渲染的 stat 开销可以忽略。
+    """
+    static_dir = app.static_folder
+    latest = 0.0
+    if static_dir:
+        for path in Path(static_dir).rglob("*"):
+            if path.is_file():
+                latest = max(latest, path.stat().st_mtime)
+    return f"{latest:.0f}"
+
+
+def _register_security_headers(app: Flask) -> None:
+    """统一安全响应头。
+
+    后台能被任意站点 iframe 套住 = 点击劫持；nosniff 防 MIME 嗅探把
+    上传的图片当脚本执行。CSP 暂不下发——模板里仍有内联 script 与
+    onclick，直接上 script-src 'self' 会整页白屏，等内联脚本外置后再加。
+    """
+    app.jinja_env.globals["asset_version"] = lambda: _asset_version(app)
+
+    @app.after_request
+    def _security_headers(resp):
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+        resp.headers.setdefault(
+            "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+        )
+        # 静态资源文件名不稳定（app.css 不带 hash），靠 ?v= 做缓存击穿
+        if request.path.startswith("/static/"):
+            resp.headers.setdefault("Cache-Control", "public, max-age=604800")
+        return resp
 
 
 def _display_tz():
@@ -92,6 +135,12 @@ def _register_error_handlers(app: Flask) -> None:
         if request.path.startswith("/api/"):
             return jsonify({"ok": False, "error": "接口不存在"}), 404
         return render_template("error.html", code=404, message="页面不存在"), 404
+
+    @app.errorhandler(403)
+    def forbidden(_e):
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "需要管理员权限"}), 403
+        return render_template("error.html", code=403, message="当前账号没有这个操作权限"), 403
 
     @app.errorhandler(500)
     def server_error(e):

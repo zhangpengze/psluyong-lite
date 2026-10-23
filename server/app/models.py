@@ -97,6 +97,7 @@ class Record(db.Model):
     processing_ms = Column(Integer, default=0)
 
     is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime)  # 软删除时间，回收站排序与日后自动清理用
     created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
 
     __table_args__ = (
@@ -104,11 +105,21 @@ class Record(db.Model):
         Index("idx_records_employee_date", "employee_name", "work_date"),
         Index("idx_records_partner_date", "partner_name", "work_date"),
         Index("idx_records_created_at_id", "created_at", "id"),
-        # 去重兜底：同一天 + 同作者 + 同标题只允许一条未删除记录。
-        # 路由层的"先查后插"挡不住并发，必须由数据库兜底。
+        # 去重兜底：同一天 + 同一员工 + 同一模板 + 同作者 + 同标题
+        # 只允许一条未删除记录。路由层的"先查后插"挡不住并发，必须由数据库兜底。
+        #
+        # 键的构成有讲究，两个都踩过：
+        #   - 带上 employee_name：原来只按 (work_date, author, title) 判重，
+        #     两个员工同一天做同一篇稿子时，第二个人被判"重复提交"，
+        #     白跑一次 PS 还拿不到记录。
+        #   - 带上 template_name：同一员工同一天用两个期刊模板出同一篇稿
+        #     是真实业务，不能拦。拦了员工只能改标题造假，比重复记录更糟。
+        # 剩下的语义是"同一个人用同一个模板重复做了同一件事"——那才是误操作。
         Index(
-            "uq_records_date_author_title_active",
+            "uq_records_dedup_active",
             "work_date",
+            "employee_name",
+            "template_name",
             "author",
             "title",
             unique=True,
@@ -145,6 +156,36 @@ class Record(db.Model):
             except (TypeError, ValueError):
                 data["warnings"] = []
         return data
+
+
+class AuditLog(db.Model):
+    """后台写操作的审计流水。
+
+    为什么值得单独一张表：删除/恢复/导出/重推这类动作以前只写 logger，
+    容器日志被轮转掉就永久消失。误删一批记录、追查"谁动过"，那时候
+    再想补是补不回来的。
+    """
+
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+    at = Column(DateTime, nullable=False, default=utcnow, index=True)
+    actor = Column(String(64), nullable=False, default="-")  # 用户名，或 api_key
+    action = Column(String(32), nullable=False, index=True)  # delete_record / restore_record / export_csv / push_report / login_failed
+    target = Column(String(64))  # 如 record:123
+    detail = Column(String(500))
+    ip = Column(String(64))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "at": iso_utc(self.at),
+            "actor": self.actor,
+            "action": self.action,
+            "target": self.target,
+            "detail": self.detail,
+            "ip": self.ip,
+        }
 
 
 def init_seed(app) -> None:

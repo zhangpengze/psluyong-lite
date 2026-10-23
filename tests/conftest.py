@@ -51,6 +51,20 @@ def admin_client(app):
 
 
 @pytest.fixture()
+def admin_csrf(admin_client):
+    """已登录会话 + 从页面 meta 取到的 CSRF 请求头。
+
+    模拟后台真实写操作：先渲染页面拿 token，再带 X-CSRF-Token 调写接口。
+    """
+    import re
+
+    html = admin_client.get("/dashboard").get_data(as_text=True)
+    match = re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
+    assert match, "后台页面缺少 CSRF meta 标签"
+    return {"X-CSRF-Token": match.group(1)}
+
+
+@pytest.fixture()
 def clean_db(app):
     """每个用例前清空业务表，避免用例间互相污染"""
     with app.app_context():

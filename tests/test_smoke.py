@@ -66,6 +66,27 @@ def test_submit_record_with_image(client, clean_db, sample_image):
     assert thumb.status_code == 200 and len(thumb.data) > 0
 
 
+def test_detail_exposes_filename_not_server_path(client, clean_db, sample_image):
+    """详情/列表响应只给原始文件名，绝不回传服务器绝对路径。
+
+    硬约束（与 CSV 删「图片路径」列同一来源，审计 B3/D1）：浏览器与
+    导出链路都不该拿到服务器文件系统路径；详情抽屉据此渲染「图片文件名」。
+    to_dict() 一旦加回 image_path，这条用例必须红。
+    """
+    created = _submit(client, sample_image)
+    assert created.status_code == 201
+    record_id = created.get_json()["data"]["id"]
+
+    detail = client.get(f"/api/v1/records/{record_id}", headers=AUTH).get_json()["data"]
+    assert "image_path" not in detail
+    assert detail["has_image"] is True
+    assert detail["image_filename"] == "result.png"
+
+    listed = client.get("/api/v1/records", headers=AUTH).get_json()["items"][0]
+    assert "image_path" not in listed
+    assert listed["image_filename"] == "result.png"
+
+
 def test_duplicate_record_rejected(client, clean_db, sample_image):
     assert _submit(client, sample_image).status_code == 201
     second = _submit(client, sample_image)

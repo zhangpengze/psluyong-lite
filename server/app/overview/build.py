@@ -1,4 +1,4 @@
-"""仪表盘概览数据：KPI / 趋势 / 合作伙伴明细（含各模板用量）。
+"""概览数据聚合：KPI / 趋势 / 合作伙伴明细（含各模板用量）。
 
 为什么直接聚合、不建预聚合表：
     这是单主管内网看板，records 按天增长几十条量级。带
@@ -7,41 +7,19 @@
     用复杂度换一个不存在的性能问题。升级路径写在
     docs/design/dashboard-redesign.md：records 过 10 万行、或本接口
     P95 超过 500ms 再上预聚合，接口形状不用变。
-
-口径（全站只有这一处定义，页面底部也会原样展示）：
-    调用次数 = is_deleted=0 的全部记录，含失败；成功率单独算，不掺进次数。
-    业务日 = work_date（员工填的工作日期），不是 created_at——员工晚上补传
-    昨天的记录时，日报按工作日期归属，不能因为传晚了就归到第二天。
-    合作伙伴只统计 partner_name 非空的记录；空伙伴名的记录照常计入总量。
 """
 
 from __future__ import annotations
 
-import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import distinct, func
 
-from .config import Config
-from .db import db
-from .models import STATUS_FAILED, Record
-from .status import system_status
-
-# 快捷区间的天数跨度（含今天）。昨天是特殊单日档。
-PRESETS: dict[str, int] = {"today": 0, "yesterday": 1, "7d": 6, "30d": 29}
-PRESET_LABELS = {
-    "today": "今天",
-    "yesterday": "昨天",
-    "7d": "近 7 天",
-    "30d": "近 30 天",
-    "custom": "自定义",
-}
-MAX_CUSTOM_DAYS = 90  # 再长趋势图就糊成一条线，没有查看价值
-
-# 伙伴明细默认只出前 20 家；0 = 全部（导出与「显示全部」按钮用）
-DEFAULT_PARTNER_LIMIT = 20
-MAX_PARTNER_LIMIT = 500
+from ..config import Config
+from ..db import db
+from ..models import STATUS_FAILED, Record
+from ..status import system_status
 
 # 伙伴活跃度口径：按"今天 - 最近一次调用"的天数分档
 ACTIVE_MAX_DAYS = 7
@@ -49,67 +27,6 @@ WARNING_MAX_DAYS = 14
 STATUS_LABELS = {"active": "活跃", "warning": "预警", "dormant": "停用"}
 
 CALLS_DEFINITION = "is_deleted=0 的全部记录（含失败）"
-
-
-class RangeError(ValueError):
-    """时间区间不合法：消息直接给用户看"""
-
-
-def _parse_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
-def parse_range(args) -> tuple[date, date, str, str]:
-    """把请求参数解析成 (start, end, label, preset)。
-
-    preset 用于页面高亮当前 chip；custom 时前端回显输入的起止日期。
-    """
-    preset = (args.get("range") or "7d").strip()
-    today = date.today()
-
-    if preset == "custom":
-        start = _parse_date(args.get("start"))
-        end = _parse_date(args.get("end"))
-        if start is None or end is None:
-            raise RangeError("自定义区间需要完整的开始和结束日期（格式 YYYY-MM-DD）")
-        if start > end:
-            raise RangeError("开始日期不能晚于结束日期，请检查后重试")
-        if end > today:
-            raise RangeError("结束日期不能晚于今天")
-        if (end - start).days + 1 > MAX_CUSTOM_DAYS:
-            raise RangeError(f"自定义区间最长 {MAX_CUSTOM_DAYS} 天，趋势图超出后无法细看")
-        return start, end, PRESET_LABELS["custom"], preset
-
-    if preset not in PRESETS:
-        raise RangeError("不支持的时间范围，请用页面上的快捷区间")
-
-    if preset == "yesterday":
-        day = today - timedelta(days=1)
-        return day, day, PRESET_LABELS["yesterday"], preset
-    return today - timedelta(days=PRESETS[preset]), today, PRESET_LABELS[preset], preset
-
-
-def parse_limit(args) -> int:
-    """伙伴明细的展示条数：默认 20，0 = 全部，上限 500。
-
-    非法值不报错、退回默认：这是展示偏好，不是安全边界——
-    为一个手打的 limit 参数返回 400，只会让人以为数据坏了。
-    """
-    raw = (args.get("limit") or "").strip()
-    if raw == "":
-        return DEFAULT_PARTNER_LIMIT
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_PARTNER_LIMIT
-    if value == 0:
-        return 0
-    return min(max(value, 1), MAX_PARTNER_LIMIT)
 
 
 def _display_tz():
@@ -306,29 +223,3 @@ def build_overview(start: date, end: date, label: str, preset: str) -> dict:
             "tz": Config.TZ,
         },
     }
-
-
-# 15 秒缓存：轮询 30 秒一次，多数轮询撞缓存；手动刷新之间也不会重复算。
-# 记录写入（新增/删除/恢复）会主动 invalidate，主管看着页面也能近实时。
-_CACHE: dict[tuple[date, date, str], tuple[float, dict]] = {}
-_CACHE_TTL = 15.0
-_CACHE_MAX = 32
-
-
-def invalidate() -> None:
-    """records 发生变化后调用：清掉概览缓存，下次请求现算"""
-    _CACHE.clear()
-
-
-def get_overview(start: date, end: date, label: str, preset: str) -> dict:
-    """带 15 秒缓存的概览入口。返回的 dict 只读，调用方不要改。"""
-    key = (start, end, preset)
-    now = time.monotonic()
-    hit = _CACHE.get(key)
-    if hit and now - hit[0] < _CACHE_TTL:
-        return hit[1]
-    data = build_overview(start, end, label, preset)
-    if len(_CACHE) >= _CACHE_MAX:
-        _CACHE.pop(next(iter(_CACHE)))  # 键空间很小，粗暴淘汰最老一个
-    _CACHE[key] = (now, data)
-    return data

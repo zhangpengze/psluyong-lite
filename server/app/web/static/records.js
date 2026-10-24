@@ -38,27 +38,6 @@
     return box;
   }
 
-  async function copyText(text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('已复制：' + text, 'success');
-    } catch (e) {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-        toast('已复制到剪贴板', 'success');
-      } catch (e2) {
-        toast('复制失败，请手动选择复制', 'error');
-      }
-      ta.remove();
-    }
-  }
-
   function reloadKeepingScroll() {
     try { sessionStorage.setItem(SCROLL_KEY, String(window.scrollY)); } catch (e) { /* 忽略 */ }
     location.reload();
@@ -92,7 +71,9 @@
     grid.appendChild(field('提交机器', d.client_machine, { mono: true }));
     grid.appendChild(field('PS 版本', d.ps_version, { mono: true }));
     grid.appendChild(field('耗时', d.processing_ms ? (d.processing_ms / 1000).toFixed(1) + ' s' : '-'));
-    grid.appendChild(field('图片路径', d.image_path, { mono: true }));
+    /* 图片只展示原始文件名：to_dict() 刻意不含服务器绝对路径（与 CSV 删「图片路径」
+       列同一约束，审计 B3/D1），要看图走下方「查看原图」的鉴权接口 */
+    grid.appendChild(field('图片文件名', d.image_filename, { mono: true }));
     if (d.error_message) grid.appendChild(field('错误信息', d.error_message, { danger: true }));
     if (d.warnings && d.warnings.length) {
       grid.appendChild(field('生成告警（' + d.warnings.length + '）', d.warnings.join('；'), { warn: true }));
@@ -102,14 +83,6 @@
     var actions = document.createElement('div');
     actions.className = 'detail-actions';
 
-    if (d.image_path) {
-      var copy = document.createElement('button');
-      copy.type = 'button';
-      copy.className = 'btn ghost sm';
-      copy.textContent = '复制路径';
-      copy.addEventListener('click', function () { copyText(d.image_path); });
-      actions.appendChild(copy);
-    }
     if (d.has_image) {
       var view = document.createElement('button');
       view.type = 'button';

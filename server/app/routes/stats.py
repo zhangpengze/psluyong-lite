@@ -127,7 +127,7 @@ def overview():
 
     range=today|yesterday|7d|30d|custom（custom 另带 start/end，YYYY-MM-DD）。
     响应同时带结构化字段和渲染好的 html 片段——首屏 Jinja 与轮询 JS
-    复用同一份标记（panels.py 生成），避免两套渲染漂移。
+    复用同一份标记（panels/ 包生成），避免两套渲染漂移。
     """
     try:
         start, end, label, preset = parse_range(request.args)

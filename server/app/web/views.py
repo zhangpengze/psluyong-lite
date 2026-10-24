@@ -21,12 +21,12 @@ from flask import (
 from ..audit import ACTION_LABELS, log_action
 from ..auth import admin_required, current_user, generate_csrf_token, login_required
 from ..db import db
-from ..models import AdminUser, Record
+from ..models import AdminUser
 from ..overview import RangeError, get_overview, parse_limit, parse_range
 from ..panels import overview_html
 from ..ratelimit import hit as rate_hit
 from ..ratelimit import reset as rate_reset
-from ..search import LIKE_ESCAPE, like_contains
+from ..services import records_read, records_service
 
 bp = Blueprint("web", __name__)
 logger = logging.getLogger(__name__)
@@ -46,15 +46,6 @@ def inject_current_user():
 def inject_csrf_token():
     """所有模板都能拿到 CSRF token，渲染进 <meta> 供 fetch 带上"""
     return {"csrf_token": generate_csrf_token}
-
-
-def _parse_date(value: str | None, default: date) -> date:
-    if not value:
-        return default
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError:
-        return default
 
 
 @bp.get("/")
@@ -146,85 +137,31 @@ def dashboard():
 @bp.get("/records")
 @login_required
 def records():
-    today = date.today()
-    start = _parse_date(request.args.get("start"), today - timedelta(days=6))
-    end = _parse_date(request.args.get("end"), today)
-    if start > end:
-        start, end = end, start
-    query = Record.query.filter(
-        Record.is_deleted.is_(False),
-        Record.work_date >= start,
-        Record.work_date <= end,
-    )
+    """记录列表：筛选 / 分页 / 回收站数据全部下沉 services，与 API 同一套语义。
 
+    筛选关键词的 LIKE 转义、页码夹取等规则只在 services 有一份实现，
+    后台页面与 /api/v1/records 不会再各写一遍然后漂移。
+    """
+    today = date.today()
+    start, end = records_service.resolve_range(request.args.get("start"), request.args.get("end"))
     employee = request.args.get("employee", "")
     partner = request.args.get("partner", "")
     status = request.args.get("status", "")
     keyword = (request.args.get("q") or "").strip()
 
-    if employee:
-        query = query.filter(Record.employee_name == employee)
-    if partner:
-        query = query.filter(Record.partner_name == partner)
-    if status:
-        query = query.filter(Record.status == status)
-    if keyword:
-        # 必须走 like_contains + escape：直接 f"%{keyword}%" 会让 SQLite 把
-        # 关键词里的 % 和 _ 当通配符，主管搜「50%」等于把全表捞出来当搜索结果。
-        # 这条规则和 API 接口共用同一份实现（server/app/search.py）。
-        like = like_contains(keyword)
-        query = query.filter(
-            db.or_(
-                Record.author.like(like, escape=LIKE_ESCAPE),
-                Record.title.like(like, escape=LIKE_ESCAPE),
-                Record.partner_name.like(like, escape=LIKE_ESCAPE),
-                Record.template_name.like(like, escape=LIKE_ESCAPE),
-                # 员工名也要能搜：API 侧一直支持，后台页面原来漏了，
-                # 同一个词在两边给出不同结果会让人怀疑数据。
-                Record.employee_name.like(like, escape=LIKE_ESCAPE),
-            )
-        )
-
+    query, _params = records_service.build_filtered_query(
+        start, end, employee=employee, partner=partner, status=status, keyword=keyword
+    )
     try:
         page = max(1, int(request.args.get("page", 1)))
-        size = 20
     except ValueError:
         page = 1
+    rows, total, page, pages = records_read.paginate(query, page, 20)
 
-    total = query.count()
-    pages = max(1, (total + size - 1) // size)
-    # 越界页码夹回最后一页：否则 ?page=999999 会让 SQLite 扫完整个结果集
-    # 只为了返回空列表，页头还会显示 "999999 / 2" 这种鬼东西
-    page = min(page, pages)
-    rows = (
-        query.order_by(Record.created_at.desc(), Record.id.desc())
-        .limit(size)
-        .offset((page - 1) * size)
-        .all()
-    )
-
-    def distinct(column):
-        result = (
-            db.session.query(column)
-            .filter(Record.is_deleted.is_(False), column.isnot(None), column != "")
-            .distinct()
-            .order_by(column)
-            .all()
-        )
-        return [r[0] for r in result]
-
+    facets = records_service.facet_values("employees", "partners")
     # 回收站：与主表同一日期区间内的软删除记录（恢复入口）
-    deleted_rows = (
-        Record.query.filter(
-            Record.is_deleted.is_(True),
-            Record.work_date >= start,
-            Record.work_date <= end,
-        )
-        .order_by(Record.deleted_at.desc().nullslast(), Record.id.desc())
-        .limit(50)
-        .all()
-    )
-    deleted_total = Record.query.filter(Record.is_deleted.is_(True)).count()
+    deleted_rows = records_read.list_deleted_rows(start, end)
+    deleted_total = records_read.count_deleted()
 
     # 快捷日期区间：与当前 start/end 精确匹配的标记为激活态
     quick_ranges = [
@@ -255,8 +192,8 @@ def records():
         partner=partner,
         status=status,
         q=keyword,
-        employees=distinct(Record.employee_name),
-        partners=distinct(Record.partner_name),
+        employees=facets["employees"],
+        partners=facets["partners"],
         deleted_rows=deleted_rows,
         deleted_total=deleted_total,
         quick_ranges=quick_ranges,

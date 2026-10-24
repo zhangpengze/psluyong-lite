@@ -31,7 +31,8 @@ const PASS = process.env.PS_PASS;
   await firstRow.click();
   await page.waitForSelector('tr.detail-row', { timeout: 5000 });
   const detailText = await page.locator('tr.detail-row').innerText();
-  const hasFields = ['提交机器', 'PS 版本', '耗时', '图片路径'].every(k => detailText.includes(k));
+  // 图片字段是「图片文件名」（image_filename）：服务器绝对路径不进浏览器（to_dict 不含 image_path）
+  const hasFields = ['提交机器', 'PS 版本', '耗时', '图片文件名'].every(k => detailText.includes(k));
   console.log('drawer_open=' + (await page.locator('tr.detail-row').count() > 0));
   console.log('drawer_fields=' + hasFields);
 

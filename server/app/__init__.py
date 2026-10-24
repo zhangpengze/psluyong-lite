@@ -75,9 +75,13 @@ def _register_security_headers(app: Flask) -> None:
         resp.headers.setdefault(
             "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
         )
-        # 静态资源文件名不稳定（app.css 不带 hash），靠 ?v= 做缓存击穿
+        # 静态资源文件名不稳定（app.css 不带 hash），靠 ?v= 做缓存击穿。
+        # 这里必须显式赋值：Flask/Werkzeug 的 send_file 已先下发
+        # Cache-Control: no-cache，setdefault 碰到既有值不会覆盖，实测拿不到
+        # 7 天长缓存，表现为每次进后台都重拉 app.css。
+        # 仅 /static/ 走覆盖，页面与 API 响应的缓存语义维持原样。
         if request.path.startswith("/static/"):
-            resp.headers.setdefault("Cache-Control", "public, max-age=604800")
+            resp.headers["Cache-Control"] = "public, max-age=604800"
         return resp
 
 

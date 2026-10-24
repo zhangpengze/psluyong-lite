@@ -133,15 +133,49 @@ def test_page_413_is_plain_text(probe_app):
 # ---------- 静态资源缓存头 ----------
 
 def test_static_asset_carries_cache_header(app):
-    """静态资源必须能被正常取到并带缓存头。
+    """静态资源必须下发 7 天长缓存。
 
-    注意：Flask 自己先下发了 no-cache，after_request 里的 setdefault 因此
-    不会覆盖成 7 天长缓存（现状如此，已在回传里记为遗留问题）。
+    Flask 的 send_file 会先写 Cache-Control: no-cache，after_request 里
+    只能显式覆盖——setdefault 碰到既有值不生效，实测拿不到 604800，
+    现象就是每次进后台都重拉 app.css。
     """
     resp = app.test_client().get("/static/app.css")
 
     assert resp.status_code == 200
-    assert resp.headers.get("Cache-Control"), "静态响应必须带 Cache-Control"
+    assert resp.headers.get("Cache-Control") == "public, max-age=604800"
+
+
+def test_static_cache_override_keeps_security_headers(app):
+    """覆盖缓存头不能顺手丢掉安全头"""
+    resp = app.test_client().get("/static/app.css")
+
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert resp.headers["Referrer-Policy"] == "same-origin"
+
+
+def test_non_static_response_cache_not_overwritten(probe_app):
+    """非静态响应的 Cache-Control 不许被改成 7 天长缓存。
+
+    页面/API 没设缓存头就不该凭空多一个；自己设过的（如缩略图的
+    private 缓存）必须原样保留，否则代理或浏览器会缓存到不该缓存的内容。
+    """
+    client = probe_app.test_client()
+
+    page = client.get("/login")
+    assert page.status_code == 200
+    page_cc = page.headers.get("Cache-Control", "")
+    assert "604800" not in page_cc, f"页面响应被误覆盖: {page_cc!r}"
+    assert "public, max-age" not in page_cc, f"页面响应被误覆盖: {page_cc!r}"
+
+    # 探针视图自己下发的缓存语义必须原样保留
+    probe = client.get("/api/__probe403")
+    assert probe.status_code == 403
+    assert "public, max-age=604800" not in probe.headers.get("Cache-Control", "")
+
+    # 安全头对非静态响应照常下发
+    assert page.headers["X-Content-Type-Options"] == "nosniff"
+    assert page.headers["X-Frame-Options"] == "SAMEORIGIN"
 
 
 # ---------- 模板过滤器 ----------

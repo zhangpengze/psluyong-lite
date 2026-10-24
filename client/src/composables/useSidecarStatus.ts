@@ -35,6 +35,15 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   /** 受阻原因原文（服务端返回），悬停提示用 */
   const blockedReason = ref('')
   /**
+   * 跑完了却既没进服务器也没进队列的次数（本地磁盘/服务异常）。
+   * 正常恒为 0——sidecar 有后台结算 + 启动对账兜底，非 0 说明那两条路也失败了，
+   * 员工必须看见，否则等到月底对账才发现少了几条记录。
+   */
+  const unsynced = ref(0)
+  const unsyncedHint =
+    '这几次生成的图片还在本机输出目录里，但记录没能自动上报。' +
+    '软件会继续重试；一直这样请把「设置 → 关于」里的日志发给管理员。'
+  /**
    * 配置受阻的说明文案：员工改对 API Key / 服务器地址后，这些记录会自动补传。
    * 放在这里而不是 App.vue——文案依赖的就是上面这四个 ref，散在视图里迟早不同步。
    */
@@ -50,6 +59,8 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   const todayCount = ref(0)
   /** 配置自愈提示只弹一次（每个窗口的进程各一次） */
   let recoveryNotified = false
+  /** 待补报提示同理：只弹一次，别每 60 秒骚扰一遍 */
+  let unsyncedNotified = false
 
   /**
    * @param quiet 静默失败：轮询时不弹大错误条（离线有状态点表达），
@@ -66,8 +77,13 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
       deadCount.value = s.dead ?? 0
       pendingBlocked.value = s.pending_blocked ?? 0
       blockedReason.value = s.blocked_reason ?? ''
+      unsynced.value = s.unsynced ?? 0
       serverBusy.value = !!s.busy
       loadError.value = ''
+      if (unsynced.value > 0 && !unsyncedNotified) {
+        unsyncedNotified = true
+        toast(`有 ${unsynced.value} 次生成还没同步到服务器，正在自动重试`, 'warning')
+      }
       // 配置被自愈过（文件损坏）只提示一次：员工需要知道"Key 可能要重填"，
       // 但每 60 秒弹一遍就是骚扰。进程内只弹一次，重启后由 sidecar 重新给。
       const recovered = (s.config_recovered ?? '').trim()
@@ -200,6 +216,8 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
     pendingBlocked,
     blockedReason,
     blockedHint,
+    unsynced,
+    unsyncedHint,
     loadError,
     serverBusy,
     todayCount,

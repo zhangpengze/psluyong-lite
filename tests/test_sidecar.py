@@ -685,3 +685,72 @@ def test_cancel_without_running_task_is_soft_error(sc, configured):
     resp = sc.post("/export/cancel", json={})
     assert resp.status_code == 200
     assert resp.get_json()["ok"] is False
+
+
+# ========== 上一次运行遗留的任务（结算/对账）==========
+OLD_TASK_ID = "20261024-090000-old00001"
+
+
+def _old_task_dir(**status_over) -> Path:
+    """造一个"上次运行时跑完、但没来得及上报"的任务目录（重启后只存在于磁盘）"""
+    from client.sidecar.config import app_data_dir
+
+    task_dir = app_data_dir() / "executions" / OLD_TASK_ID
+    task_dir.mkdir(parents=True, exist_ok=True)
+    params = {
+        "author": "老任务",
+        "title": "遗留稿",
+        "template_id": "tpl-1.psd",
+        "template_name": "中国收藏",
+        "partner_name": "甲",
+        "employee_name": "张三",
+        "work_date": "2026-10-23",
+    }
+    (task_dir / "params.json").write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
+    status = {
+        "state": "done",
+        "success": True,
+        "image_path": str(task_dir / "老任务.jpg"),
+        "message": "",
+        "warnings": [],
+        "duration_ms": 4200,
+    }
+    status.update(status_over)
+    (task_dir / "status.json").write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+    # 用例之间共用同一个数据目录：上一个用例可能已经把它结算过了
+    (task_dir / "result.json").unlink(missing_ok=True)
+    return task_dir
+
+
+def test_export_status_settles_task_from_previous_run(sc, configured, monkeypatch):
+    """软件被关掉时留下的终态任务：下次打开轮询到它就必须补报
+
+    旧版把上报写在轮询里，但结果缓存和上报是同一步——重启后 result.json 不在，
+    这条记录只会在有人碰它时才被处理；而员工根本不会再点这个任务。
+    """
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+    _old_task_dir()
+
+    data = sc.get(f"/export/status?task_id={OLD_TASK_ID}").get_json()
+
+    assert data["finished"] is True
+    assert data["uploaded"] is True
+    assert fake.submitted[0]["fields"]["author"] == "老任务"
+    assert fake.submitted[0]["fields"]["work_date"] == "2026-10-23", "补报不能改成今天"
+
+
+def test_status_surfaces_unsynced_tasks(sc, configured, monkeypatch):
+    """待补报次数要露在 /status 上：结算一直失败时员工得看得见"""
+    import os
+
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    assert sc.get("/status").get_json()["unsynced"] == 0
+
+    task_dir = _old_task_dir()
+    # 刚跑完的不算待补报（正在结算，界面不该闪一下）
+    assert sc.get("/status").get_json()["unsynced"] == 0
+    stale = time.time() - 3600
+    os.utime(task_dir / "status.json", (stale, stale))
+
+    assert sc.get("/status").get_json()["unsynced"] >= 1

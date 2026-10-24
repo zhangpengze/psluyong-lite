@@ -6,7 +6,8 @@ Python 侧只需要一个 Flask，前端用 fetch 就能调，省掉 Rust 侧的
 风险面靠"只绑回环 + CORS 白名单"收敛。
 
 本文件只做装配：安全钩子在 security.py，业务路由按资源拆在 routes_*.py，
-文件系统判断在 file_ops.py，Photoshop 识别在 ps_info.py。
+文件系统判断在 file_ops.py，Photoshop 识别在 ps_info.py，任务结算在 settler.py
+（create_sidecar 保持无副作用，后台结算线程只在 main 里启动，测试才好控）。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ if str(_REPO_ROOT) not in sys.path:
 from flask import Flask  # noqa: E402
 
 from . import __version__  # noqa: E402,F401  重新导出：测试与外部读 sidecar_server.__version__
+from . import settler  # noqa: E402
 from .api_client import ApiClient  # noqa: E402
 from .config import ClientConfig, ensure_dirs  # noqa: E402
 from .executor import Executor  # noqa: E402
@@ -89,7 +91,13 @@ def main() -> None:
     _attach_file_logger("sidecar.log")
     port = int(os.getenv("SIDECAR_PORT", "8765"))
     app = create_sidecar()
+    # 结算不在请求里做完：员工关窗/断线/退出软件时没人来轮询，
+    # 上一次跑完的任务就永远报不进服务器。这里先做一次启动对账，
+    # 之后每 15 秒兜底扫一遍（两条路都走同一个幂等函数）。
+    if settler.start_settler(_client):
+        logger.info("任务结算已启动：启动对账 + 每 %.0fs 兜底", settler.SETTLE_INTERVAL_S)
     logger.info("sidecar 启动 http://127.0.0.1:%s", port)
+
     # 只绑回环：局域网内其他机器不应能调用本机 PS
     app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
 

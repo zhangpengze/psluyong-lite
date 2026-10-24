@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request
 
 from core.ps_connector import COM_AVAILABLE  # noqa: E402
 
-from . import __version__, queue
+from . import __version__, queue, settler
 from .config import (
     ConfigBusyError,
     last_recovery,
@@ -54,6 +54,10 @@ def register_status_routes(app: Flask, executor, _client) -> None:
                 "config": cfg.to_dict(),
                 "pending": len(queue.pending()),
                 "dead": len(queue.dead_letters()),
+                # 跑完了但还没结算（既没进服务器也没进队列）的次数。
+                # 正常情况恒为 0；非 0 说明结算一直失败（磁盘满/本地服务异常），
+                # 界面要让员工知道"有几次生成还没报上去"，而不是等月底对账才发现
+                "unsynced": len(settler.unsettled_task_ids(min_age_s=settler.UNSYNCED_MIN_AGE_S)),
                 # 被环境/配置拦住的积压（401/403/404）：必须让员工看见原因，
                 # 否则"待补传 N 条"永远不减少，而根因在设置里的 API Key 或服务器地址
                 "pending_blocked": len(blocked),

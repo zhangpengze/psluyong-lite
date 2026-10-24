@@ -145,6 +145,8 @@ export const api = {
       config: ClientConfig
       pending: number
       dead: number
+      /** 跑完但还没结算（既没进服务器也没进队列）的次数，正常恒为 0 */
+      unsynced?: number
       /** 其中因环境/配置受阻（401/403/404）的条数——修好 Key 或地址后自动补传 */
       pending_blocked?: number
       /** 受阻原因（服务端原文），界面上直接给员工看 */

@@ -40,7 +40,8 @@ const formBusy = ref(false)
 
 const {
   cfg, templates, partners, serverOk, comAvailable, ps,
-  pending, deadCount, pendingBlocked, blockedHint, loadError, serverBusy, todayCount,
+  pending, deadCount, pendingBlocked, blockedHint, unsynced, unsyncedHint,
+  loadError, serverBusy, todayCount,
   refreshStatus, waitForSidecar, refreshTemplates, refreshDicts,
   flushQueue, retryDead, refreshToday, startPolling,
 } = useSidecarStatus({ theme, applyTheme })
@@ -270,9 +271,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </template>
     </main>
 
-    <!-- 主窗底栏：无事可报时整体隐藏（离线/待补传/死信才出现），姓名悬停可见 -->
+    <!-- 主窗底栏：无事可报时整体隐藏（离线/待补传/死信/待补报才出现），姓名悬停可见 -->
     <footer
-      v-if="route === 'main' && (pending > 0 || deadCount > 0 || !serverOk)"
+      v-if="route === 'main' && (pending > 0 || deadCount > 0 || unsynced > 0 || !serverOk)"
       class="statusbar"
     >
       <span class="me" :title="cfg?.employee_name || ''">{{ cfg?.employee_name || '未设置姓名' }}</span>
@@ -283,6 +284,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <span v-if="pendingBlocked > 0" class="blocked" :title="blockedHint">
         其中 {{ pendingBlocked }} 条因配置受阻
       </span>
+      <!-- 跑完了却连离线队列都没进：正常情况下永远不出现，出现就必须让员工看见 -->
+      <span v-if="unsynced > 0" class="dead" :title="unsyncedHint">待补报 {{ unsynced }} 次</span>
       <span v-if="deadCount > 0" class="dead" :title="deadHint">死信 {{ deadCount }} 条</span>
       <div class="spacer" />
       <a v-if="pending > 0" class="link" @click="flushQueue">立即补传</a>

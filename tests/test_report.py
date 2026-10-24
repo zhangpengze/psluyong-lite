@@ -380,6 +380,29 @@ def test_push_alert_throttles_second_call(alert_cfg, monkeypatch):
     assert "已抑制" in msg
 
 
+def test_push_alert_not_swallowed_right_after_boot(alert_cfg, monkeypatch):
+    """开机/容器启动不足一个窗口时，首条告警仍必须发出去。
+
+    time.monotonic() 的起点是开机（容器里是容器启动），不是 Unix 纪元：
+    CI runner、刚 docker compose up 的 NAS 上该值可能只有几十秒。若用 0.0
+    当"从未告警"哨兵，now - 0.0 < interval 恒成立，首条告警被当成重复而静默
+    丢弃——机器刚重启恰恰是最需要收到告警的时刻（真实踩过：CI 两平台齐红）。
+    """
+    from bot import report_alert as alert_mod
+
+    monkeypatch.setattr(alert_mod.time, "monotonic", lambda: 5.0)  # 开机 5 秒
+    monkeypatch.setattr(requests, "post", lambda url, **kw: _Resp(200))
+    alert_mod.reset_alert_throttle()
+
+    ok, msg = report_mod.push_alert("首条告警")
+    assert ok is True, f"开机 5s 时首条告警被抑制：{msg}"
+
+    # 同一窗口内第二条仍要被抑制——防呆不能把节流本身改坏
+    ok2, msg2 = report_mod.push_alert("第二条告警")
+    assert ok2 is False
+    assert "已抑制" in msg2
+
+
 def test_push_alert_skipped_when_unconfigured(monkeypatch):
     """没配 NapCat：静默跳过，不发请求"""
     report_mod.reset_alert_throttle()

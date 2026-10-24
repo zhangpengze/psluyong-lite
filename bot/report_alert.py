@@ -21,15 +21,22 @@ logger = logging.getLogger(__name__)
 
 # 失败告警的最小间隔门控：PS 挂了员工连点 5 次就是 5 条失败记录，
 # 不设限会把群刷爆。值取 Config.ALERT_MIN_INTERVAL_S，测试里可调。
+#
+# 哨兵必须是 -inf，不能是 0.0：time.monotonic() 的起点是开机（容器里是容器启动），
+# 不是 Unix 纪元。用 0.0 时，机器/容器启动不足一个窗口（如 300s）内
+# `now - 0.0 < interval` 恒成立，首条告警会被当成"间隔内的重复"静默丢弃——
+# 而机器刚重启恰恰是最需要告警的时刻。
+_ALERT_NEVER = float("-inf")
+
 _alert_lock = threading.Lock()
-_last_alert_at: float = 0.0
+_last_alert_at: float = _ALERT_NEVER
 
 
 def reset_alert_throttle() -> None:
     """测试用：清空告警门控"""
     global _last_alert_at
     with _alert_lock:
-        _last_alert_at = 0.0
+        _last_alert_at = _ALERT_NEVER
 
 
 def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, str]:
@@ -68,7 +75,7 @@ def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, s
 # 是两类信息，用**各自独立**的节流器：否则凌晨备份失败会被白天的录用失败
 # 告警挤掉，反之亦然。运维类本来就不频繁，5 分钟窗口足够去重。
 _ops_lock = threading.Lock()
-_ops_last_alert_at: float = 0.0
+_ops_last_alert_at: float = float("-inf")  # 同 _ALERT_NEVER：0.0 会在开机窗口内误抑制
 OPS_ALERT_MIN_INTERVAL_S = 300
 
 
@@ -76,7 +83,7 @@ def reset_ops_alert_throttle() -> None:
     """测试用：清空运维告警节流"""
     global _ops_last_alert_at
     with _ops_lock:
-        _ops_last_alert_at = 0.0
+        _ops_last_alert_at = float("-inf")
 
 
 def push_ops_alert(title: str, detail: str = "") -> tuple[bool, str]:

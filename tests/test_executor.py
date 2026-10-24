@@ -19,6 +19,15 @@ from client.sidecar.worker import read_json, run, write_json_atomic
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# worker 用 msvcrt 做 ps.lock 进程锁并调 Photoshop COM，产品只跑 Windows
+# （见 client/sidecar/worker.py 的注释）。POSIX 上真子进程会在 worker 里以
+# "No module named 'msvcrt'" 失败，这些用例整体跳过；纯文件协议逻辑仍在本文件
+# 里跨平台跑（原子写、撕裂写、状态未知等）。
+WIN_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="sidecar worker 依赖 msvcrt/PS COM，仅 Windows 可跑",
+)
+
 
 def _make_params(task_dir: Path, **overrides) -> dict:
     params = {
@@ -43,6 +52,7 @@ def test_atomic_write_is_readable(tmp_path: Path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+@WIN_ONLY
 def test_worker_writes_final_state_without_ps(tmp_path: Path):
     """无 PS 环境：run_export 走到"模板不存在"失败分支，终态必须落盘"""
     write_json_atomic(tmp_path / "params.json", _make_params(tmp_path))
@@ -60,6 +70,7 @@ def test_worker_missing_params_writes_error(tmp_path: Path):
     assert status is not None and status["state"] == "error"
 
 
+@WIN_ONLY
 def test_executor_end_to_end_with_real_subprocess(tmp_path: Path):
     """真实子进程拉起 worker，验证 sidecar<->worker 文件协议全链路"""
     ex = Executor()
@@ -109,6 +120,7 @@ def test_executor_reports_uncertain_on_crash(tmp_path: Path):
     assert ex.running_task() is None
 
 
+@WIN_ONLY
 def test_status_from_disk_after_release(tmp_path: Path):
     """reaper 先于客户端轮询释放任务后，终态必须仍能从磁盘读回。
 
@@ -145,6 +157,7 @@ def test_status_unknown_only_when_no_terminal_file(tmp_path: Path):
     assert status == {"state": "unknown", "finished": True}
 
 
+@WIN_ONLY
 def test_no_lock_leak_under_reaper_poll_race(tmp_path: Path):
     """reaper 与客户端轮询竞速多轮，执行器锁不允许泄漏。
 

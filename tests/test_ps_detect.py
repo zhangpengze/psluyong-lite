@@ -6,6 +6,10 @@
 （真踩过：拿本机 CS6 的真实路径当候选，换台机器测试就红）。
 """
 
+import sys
+
+import pytest
+
 from client.sidecar.ps_detect import (
     detect_with,
     is_photoshop_exe,
@@ -41,6 +45,10 @@ def test_year_from_name():
     assert _year_from_name("别的软件") == 0
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="断言的是 Windows 路径语义（C:\\ 反斜杠与 .exe 后缀），POSIX 上 Path 切不开",
+)
 def test_is_photoshop_exe():
     assert is_photoshop_exe(r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe")
     assert not is_photoshop_exe(r"C:\Program Files\Adobe\Photoshop.dll")

@@ -487,6 +487,10 @@ def test_status_exposes_version_and_log_dir(sc, configured, monkeypatch):
     assert data["log_dir"].endswith("logs")
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="打开日志目录走 os.startfile，POSIX 上没有该函数（客户端只跑 Windows）",
+)
 def test_open_log_dir_uses_fixed_path(sc, configured, monkeypatch):
     """日志目录由服务端固定，不接受参数——不能变成任意目录打开器"""
     import os

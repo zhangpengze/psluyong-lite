@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           echo "pytest 退出码非 0；失败清单（最多 15 条，已打成注解）"
-          grep -E "^(FAILED|ERROR) " pytest-out.log | head -15 | while IFS= read -r line; do
+          grep -E "^(FAILED|ERROR) |^E   " pytest-out.log | head -30 | while IFS= read -r line; do
             echo "::error title=pytest failure::$line"
           done
           # 收集期错误（exit 2）未必有 FAILED 行，兜底打印尾部摘要

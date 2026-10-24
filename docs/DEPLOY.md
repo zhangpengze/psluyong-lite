@@ -516,3 +516,60 @@ docker compose restart server
 | extra_hosts | 无 | `host.docker.internal:host-gateway`（容器内访问宿主机 13000 的 NapCat） | 功能性差异保留；根 compose 的 NapCat 走局域网 IP（见第三节 3） |
 | 镜像 tag | `psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}` | 同左 | **已收敛为同款**（原两处写死 `latest`，即 B7） |
 | 日志限流 / 资源限制 | json-file 10m×3 / 2 核 1G | 同左 | 一致，无漂移 |
+
+## 七、密钥轮换（泄露响应）
+
+`.env` 里四个值一旦泄露（截图、误提交、交接不清），按下面顺序换，**换完必须重启生效**。
+2026-10-24 的真实事故就是这么处理的：`.env.bak.ci`（复现「CI 没有 .env」时的备份）被
+`git add -A` 带进提交并推到公开仓库；即使 force-push 重写历史，旧提交 SHA 在 GitHub 上
+仍能被直接访问——**删除历史不等于止血，轮换才是**。
+
+| 键 | 影响面 | 换的代价 |
+|----|--------|----------|
+| `SECRET_KEY` | 登录 session 签名 | 全员重新登录，无其它影响。最先换这个 |
+| `API_KEY` | 员工客户端提交记录 | **每台员工机的客户端配置都要同步改**，否则提交 401 |
+| `ADMIN_PASSWORD` | 主管后台登录 | 见下方「注意」：改 `.env` 不会改已有管理员密码，必须走 `reset-password` |
+| `NAPCAT_TOKEN` | 机器人推送鉴权 | **必须同时在 NapCat「网络配置 → HTTP 服务端」改成一致的值**，否则推送 401 |
+
+生成新值（任意 Python 3 环境）：
+
+```bash
+python -c "import secrets;print(secrets.token_urlsafe(32))"
+```
+
+### 服务端（NAS）换法
+
+```bash
+# 1. 停服 + 备份当前 .env（备份放项目目录外，别再犯误提交的错）
+docker compose down
+cp .env /volume1/备份/.env.bak.$(date +%Y%m%d)
+
+# 2. 改 .env 里对应四行（绿联文件管理默认隐藏 . 开头文件，需先开「显示隐藏文件」）
+#    SECRET_KEY= / API_KEY= / ADMIN_PASSWORD= / NAPCAT_TOKEN=
+
+# 3. 起服
+docker compose up -d
+
+# 4. 管理员密码必须单独重置（init_seed 只在「查无此用户」时建号）
+docker compose exec web flask reset-password --username admin --password '<新密码>'
+
+# 5. 验证
+curl -fsS http://127.0.0.1:8000/health/ready
+```
+
+> **注意**：`server/app/models.py::init_seed` 只在管理员不存在时写密码，所以**只改 `.env`
+> 里的 `ADMIN_PASSWORD` 对已部署的库无效**，登录仍是旧密码——第 4 步不能省。
+
+### 员工客户端换法
+
+改了 `API_KEY` 后，每台员工机：客户端「设置 → 服务端」的 API Key 填新值 → 保存 → 提交一条
+测试记录确认不再 401。漏改的机器会持续提交失败并堆在客户端离线队列里，补传时依旧 401——
+**API_KEY 要么不换，要换就一次换干净**。短期无法逐台更新时，先只换 `SECRET_KEY`、
+`ADMIN_PASSWORD`、`NAPCAT_TOKEN`，把 `API_KEY` 排到下次上门维护。
+
+### 事故后的额外动作
+
+1. GitHub 上的旧对象不会因 force-push 立刻消失（`raw.githubusercontent.com/<owner>/<repo>/<旧SHA>/.env` 仍可访问），
+   轮换后可向 GitHub Support 提工单请求清理缓存对象；**把仓库转 Private 是最快的止血**。
+2. 泄露过的值一律当「已公开」，任何环境都不再复用。
+3. 查审计日志有无异常登录：后台「审计日志」页，或 `app.db` 的 `audit_log` 表。

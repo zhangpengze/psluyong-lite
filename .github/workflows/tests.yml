@@ -16,6 +16,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # 密钥文件门禁：.env 及其任何变体（.env.local/.env.bak.ci/.env.prod）一律
+      # 不得入库，只放行模板。真实事故：为复现「CI 没有 .env」执行
+      # cp .env .env.bak.ci，该文件被 git add -A 带进提交并推到公开仓库，
+      # SECRET_KEY/API_KEY/ADMIN_PASSWORD/NAPCAT_TOKEN 暴露约 2 分钟。
+      - name: Secret file guard
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          leaks=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '^\.env\.example$' || true)
+          if [ -n "$leaks" ]; then
+            echo "以下环境文件被纳入版本控制（禁止，只允许 .env.example）："
+            printf '%s\n' "$leaks"
+            exit 1
+          fi
+          echo "密钥文件门禁通过：仓库内无 .env / .env.* 实体文件"
       # 行数门禁：源文件 >300 行即失败。口径 = server/core/bot/client 的
       # py/vue/ts/js（不含 css/tests/scripts，与项目裁决一致）。
       # 只在 Linux 跑一次（矩阵里跑两遍没意义；Windows 侧 find/awk 语义不同）。

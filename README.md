@@ -26,12 +26,13 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               494 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               515 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
                      日报推送重试、区间日报、失败告警门控、
-                     QQ 机器人指令（日期参数/白名单/冷却/回调鉴权/审计）
+                     QQ 机器人指令（日期参数/双白名单/冷却/回调鉴权/限流/审计）、
+                     OneBot 响应体判定、离线队列拒绝码分级
 ```
 
 ## 快速开始
@@ -110,7 +111,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（494 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（515 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -160,6 +161,9 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 | 系统自身状态看不见 | 仪表盘底部条：最后备份 / 昨日日报推送 / 图片占用 | 业务指标再好看，备份挂了、日报没推也白搭 |
 | 后台安全响应头 | `nosniff` / `X-Frame-Options` / `Referrer-Policy` / `Permissions-Policy` | 防点击劫持与 MIME 嗅探；CSP 待内联脚本全部外置后再上 |
 | 登录被暴力猜 | 同来源 5 分钟内失败 5 次即 429 + 审计留痕 | 内网端口往往整层楼可达，不能裸奔 |
+| 推送失败被当成成功 | 解析 OneBot **响应体**（`status`/`retcode`），HTTP 200 但 body 说 failed 也算失败；4xx 不重试 | 群号写错/机器人被踢/Token 失效/被风控全回 200——只看状态码会让日志、徽标、仪表盘一起绿，而群里没有消息 |
+| 补传时把整批记录删了 | 只有 400/409/422 删；401/403/404 保留并标「受阻」，界面显示原因 | 换 API Key 忘同步时，旧实现给每条 401 都判「业务拒绝」→ 积压静默清空，界面还显示补传成功 |
+| 机器人指令谁都能用 | 回调密钥缺省拒绝（`BOT_ALLOW_INSECURE=1` 才放行）+ QQ/群双白名单 + 限流 | 该端点匿名可达时，任何碰到 NAS 端口的人发句「汇总」就能拿走含员工姓名与稿件标题的报表 |
 
 ## 部署
 

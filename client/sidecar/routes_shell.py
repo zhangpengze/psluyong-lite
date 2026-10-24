@@ -57,11 +57,14 @@ def register_shell_routes(app: Flask, _client) -> None:
     # ========== 离线队列 ==========
     @app.get("/queue")
     def queue_status():
+        blocked = queue.blocked_items()
         return jsonify(
             {
                 "ok": True,
                 "pending": len(queue.pending()),
                 "dead": len(queue.dead_letters()),
+                "pending_blocked": len(blocked),
+                "blocked_reason": blocked[0]["reason"] if blocked else "",
             }
         )
 
@@ -77,5 +80,6 @@ def register_shell_routes(app: Flask, _client) -> None:
         cfg = load_config()
         flushed = queue.flush(_client(cfg)) if moved["restored"] else {
             "sent": 0, "skipped": 0, "remaining": len(queue.pending()), "dead": moved["dead"],
+            "blocked": len(queue.blocked_items()), "block_reason": "",
         }
         return jsonify({"ok": True, "restored": moved["restored"], "failed": moved["failed"], **flushed})

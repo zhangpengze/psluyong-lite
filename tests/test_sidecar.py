@@ -132,6 +132,26 @@ def test_status_endpoint(sc, configured, monkeypatch):
     assert data["pending"] == 0
 
 
+def test_status_exposes_blocked_queue_reason(sc, configured, monkeypatch, tmp_path):
+    """配置受阻（401/403/404）的积压必须在 /status 里露出来
+
+    旧版补传把这些记录直接删掉：界面"待补传 3 条"变 0，看着像补传成功，
+    员工永远不会去检查 API Key。现在记录保留 + 给出原因，底栏才能提示。
+    """
+    from client.sidecar import queue
+
+    monkeypatch.setattr(queue, "QUEUE_DIR", tmp_path / "pending")
+    monkeypatch.setattr(queue, "DEAD_DIR", tmp_path / "dead")
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+    queue.enqueue({"author": "张三"}, None, blocked_reason="HTTP 401: API Key 无效")
+
+    data = sc.get("/status").get_json()
+
+    assert data["pending"] == 1
+    assert data["pending_blocked"] == 1
+    assert "401" in data["blocked_reason"]
+
+
 def test_config_roundtrip(sc):
     resp = sc.post("/config", json={"employee_name": "李四", "jpg_quality": 8})
     assert resp.status_code == 200

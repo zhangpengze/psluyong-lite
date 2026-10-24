@@ -1224,6 +1224,15 @@ kbd {
   cursor: help;
   font-weight: 600;
 }
+/* 配置受阻：比死信更常见（换 Key/改地址没同步），用主色提示"去设置" */
+.statusbar .blocked {
+  padding: 1px 7px;
+  border-radius: 7px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  color: var(--primary);
+  cursor: help;
+  font-weight: 600;
+}
 .statusbar .dead-link {
   color: var(--warn);
   cursor: pointer;

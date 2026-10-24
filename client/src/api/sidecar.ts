@@ -145,6 +145,10 @@ export const api = {
       config: ClientConfig
       pending: number
       dead: number
+      /** 其中因环境/配置受阻（401/403/404）的条数——修好 Key 或地址后自动补传 */
+      pending_blocked?: number
+      /** 受阻原因（服务端原文），界面上直接给员工看 */
+      blocked_reason?: string
       busy: boolean
       machine: string
       version: string
@@ -265,12 +269,16 @@ export const api = {
     request<{ ok: boolean; path?: string; error?: string }>('/logs/open', { method: 'POST' }),
 
   flushQueue: () =>
-    request<{ ok: boolean; sent: number; skipped: number; remaining: number; dead: number }>(
-      '/queue/flush',
-      {
-        method: 'POST',
-      },
-    ),
+    request<{
+      ok: boolean
+      sent: number
+      skipped: number
+      remaining: number
+      dead: number
+      /** 当前受阻条数与原因（401/403/404 保留在队列里，不会像以前那样被静默删除） */
+      blocked?: number
+      block_reason?: string
+    }>('/queue/flush', { method: 'POST' }),
 
   retryDead: () =>
     request<{

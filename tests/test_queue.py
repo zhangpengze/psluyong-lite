@@ -2,7 +2,10 @@
 
 核心约定：
 - 网络断（status=0）不该消耗重试次数——员工的记录不是"坏数据"
-- 4xx 是业务拒绝（比如重复），重试一万次也一样，直接丢
+- 400/409/422 是"这条数据本身有问题"，重试一万次也一样，直接丢
+- 401/403/404 是环境/配置问题（Key 轮换没同步、地址指向旧版本），
+  **记录必须保留**——2026-10-24 修的就是这里：旧版一律 remove()，
+  换 Key 的瞬间整批积压静默消失，界面还显示成补传成功
 - 5xx 可能是毒记录（图片被删了），要有上限，否则永远堵住队头
 - 连续多条 5xx 说明服务端整体挂了，别再一条条试
 """
@@ -159,6 +162,96 @@ def test_4xx_drops_record_without_retry(qdir):
     assert result["remaining"] == 0
     assert list(pending.glob("*.json")) == []
     assert list(dead.glob("*.json")) == [], "业务拒绝不算死信"
+
+
+@pytest.mark.parametrize("status", [400, 409, 422])
+def test_discard_status_drops_record(qdir, status):
+    """400/409/422 = 这条数据本身不合法，删掉而不是留成补不成功的毒记录"""
+    pending, _dead = qdir
+    _enqueue()
+
+    result = queue.flush(FakeClient([status]))
+
+    assert result["skipped"] == 1
+    assert result["remaining"] == 0
+    assert list(pending.glob("*.json")) == []
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_auth_or_address_error_keeps_records(qdir, status):
+    """鉴权/地址错：记录是好的，一条都不能丢
+
+    真实场景：轮换 API Key 后某台机器没同步、或客户端地址指向没有该接口的旧版本。
+    旧版把 401/403/404 当"业务拒绝"逐条 remove()，整批积压静默消失。
+    """
+    pending, dead = qdir
+    _enqueue("甲")
+    _enqueue("乙")
+    _enqueue("丙")
+
+    result = queue.flush(FakeClient([status] * 3))
+
+    assert result["skipped"] == 0, "环境问题不能算跳过（跳过=删除）"
+    assert result["remaining"] == 3, "三条都要留在队列里"
+    assert result["blocked"] == 1, "本轮只碰到队头一条就停了"
+    assert list(dead.glob("*.json")) == [], "这不算死信，配置修好还能补"
+    files = sorted(pending.glob("*.json"))
+    blocked = [json.loads(p.read_text(encoding="utf-8")) for p in files if json.loads(p.read_text(encoding="utf-8")).get("blocked")]
+    assert len(blocked) == 1
+    assert str(status) in blocked[0]["blocked_reason"]
+
+
+def test_blocked_record_uploads_after_config_fixed(qdir):
+    """受阻的记录不是弃子：配置修好后下一次 flush 就能补上"""
+    pending, _dead = qdir
+    _enqueue()
+
+    blocked = queue.flush(FakeClient([401]))
+    assert blocked["remaining"] == 1
+
+    fixed = queue.flush(FakeClient([None]))
+
+    assert fixed["sent"] == 1
+    assert fixed["remaining"] == 0
+    assert fixed["blocked"] == 0, "成功后 blocked 标记随文件一起消失"
+    assert list(pending.glob("*.json")) == []
+
+
+def test_429_keeps_record_without_counting_failure(qdir):
+    """限流是暂时的：保留记录、停本轮，但不能记成 5xx 失败次数"""
+    pending, _dead = qdir
+    _enqueue()
+
+    result = queue.flush(FakeClient([429]))
+
+    assert result["remaining"] == 1
+    assert result["skipped"] == 0
+    files = list(pending.glob("*.json"))
+    item = json.loads(files[0].read_text(encoding="utf-8"))
+    assert "failures" not in item, "限流不是这条记录的错，不该累计到死信"
+
+
+def test_blocked_items_exposes_reason(qdir):
+    """界面要靠这个提示员工去检查设置，而不是干看着数字不减少"""
+    _enqueue()
+    queue.flush(FakeClient([403]))
+
+    items = queue.blocked_items()
+
+    assert len(items) == 1
+    assert "403" in items[0]["reason"]
+    assert items[0]["name"].endswith(".json")
+
+
+def test_enqueue_with_blocked_reason_marks_item(qdir):
+    """新记录上报就撞 401 时直接带标记入队，界面能立刻给出原因"""
+    pending, _dead = qdir
+
+    path = queue.enqueue({"author": "张三"}, None, blocked_reason="HTTP 401: API Key 无效")
+
+    item = json.loads(path.read_text(encoding="utf-8"))
+    assert item["blocked"] is True
+    assert "401" in item["blocked_reason"]
 
 
 def test_corrupt_file_moved_to_dead_with_raw(qdir):

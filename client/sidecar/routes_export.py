@@ -57,16 +57,28 @@ def register_export_routes(app: Flask, executor, _client) -> None:
                 # 直接透传服务端文案。判重规则会变（比如键里加上模板名），
                 # 客户端硬编码一份迟早和服务端对不上，员工看到的原因就是错的。
                 upload_message = f"服务器提示：{e.message}"
-            elif e.status and e.status < 500:
-                # 4xx 是"服务端明确不要这一条"，重试永远不会成功：
-                #   401/403 → API Key 错了；400 → 参数或图片不合法；
-                #   404 → 客户端和服务端版本对不上
-                # 塞进离线队列只会变成永远补不成功的毒记录，每次启动重试一遍，
-                # 最后沉淀成死信，员工看到"有 N 条记录补传失败"却不知道原因在配置里。
+            elif e.status in queue.DISCARD_STATUS:
+                # 400/422：参数或图片本身不合法，重试永远不会成功。
+                # 塞进离线队列只会变成补不成功的毒记录，还会堵住后面的正常记录。
                 upload_message = f"服务器拒绝了这条记录（{e.status}）：{e.message}"
             else:
-                queue.enqueue(fields, str(image_path) if image_path else None)
+                # 401/403/404/429/5xx 都不是"这条数据有问题"，而是配置或环境问题
+                # （Key 轮换没同步、地址指向旧版本、被限流、服务端故障）。
+                # 旧版在这里直接丢弃不排队——员工看到"生成失败"，图其实已经生成，
+                # 这条记录永久消失。现在落队列并标受阻，配置修好后自动补传。
+                blocked_reason = ""
+                if e.status in queue.BLOCKING_STATUS or e.status == 429:
+                    blocked_reason = f"HTTP {e.status}: {e.message}"
+                queue.enqueue(
+                    fields,
+                    str(image_path) if image_path else None,
+                    blocked_reason=blocked_reason,
+                )
                 queued = True
+                upload_message = (
+                    f"服务器暂时无法接收（{e.status}）：{e.message}，记录已存本地，"
+                    "修好配置或服务恢复后自动补传"
+                )
 
         # 顺手把之前积压的补传掉
         flushed = queue.flush(client) if uploaded else {
@@ -74,6 +86,8 @@ def register_export_routes(app: Flask, executor, _client) -> None:
             "skipped": 0,
             "remaining": len(queue.pending()),
             "dead": len(queue.dead_letters()),
+            "blocked": len(queue.blocked_items()),
+            "block_reason": "",
         }
         return {
             "ok": True,

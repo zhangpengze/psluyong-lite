@@ -5,7 +5,7 @@
  * 自动补传）、死信重试。所有数字以 /status 为权威，界面各处只读这里的状态。
  */
 
-import { onUnmounted, ref, type Ref } from 'vue'
+import { computed, onUnmounted, ref, type Ref } from 'vue'
 import { api, type ClientConfig, type PsInfo, type TemplateItem } from '../api/sidecar'
 import { useConfirm } from './useConfirm'
 import { useToast } from './useToast'
@@ -30,6 +30,19 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   const comAvailable = ref(false)
   const pending = ref(0)
   const deadCount = ref(0)
+  /** 积压里因配置受阻（401/403/404）的条数：修好 Key/地址后才会自动补上 */
+  const pendingBlocked = ref(0)
+  /** 受阻原因原文（服务端返回），悬停提示用 */
+  const blockedReason = ref('')
+  /**
+   * 配置受阻的说明文案：员工改对 API Key / 服务器地址后，这些记录会自动补传。
+   * 放在这里而不是 App.vue——文案依赖的就是上面这四个 ref，散在视图里迟早不同步。
+   */
+  const blockedHint = computed(
+    () =>
+      `${pendingBlocked.value} 条记录因配置问题传不上去（${blockedReason.value || '鉴权或地址错误'}）。` +
+      '记录都还在本地，去「设置 → 账号」检查 API Key 和服务器地址，改对后会自动补传。',
+  )
   const loadError = ref('')
   /** sidecar 权威的生成中标志（切窗口后仍然准确；录入页实时上报的那个在 App） */
   const serverBusy = ref(false)
@@ -49,6 +62,8 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
       ps.value = s.ps ?? null
       pending.value = s.pending
       deadCount.value = s.dead ?? 0
+      pendingBlocked.value = s.pending_blocked ?? 0
+      blockedReason.value = s.blocked_reason ?? ''
       serverBusy.value = !!s.busy
       loadError.value = ''
       // 主题以服务端配置为准（换机器/重装不丢偏好）
@@ -99,6 +114,10 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
       const res = await api.flushQueue()
       pending.value = res.remaining
       deadCount.value = res.dead ?? deadCount.value
+      // 受阻条数必须跟着刷新：旧版补传把 401/403 的记录直接删了，界面上
+      // "待补传 3 条"变 0 看着像成功；现在记录会留着，必须让员工看见原因
+      pendingBlocked.value = res.blocked ?? 0
+      blockedReason.value = res.block_reason ?? ''
       if (res.sent > 0) refreshTemplates()
     } catch {
       /* 补传失败不打扰员工 */
@@ -169,6 +188,9 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
     comAvailable,
     pending,
     deadCount,
+    pendingBlocked,
+    blockedReason,
+    blockedHint,
     loadError,
     serverBusy,
     todayCount,

@@ -40,7 +40,7 @@ const formBusy = ref(false)
 
 const {
   cfg, templates, partners, serverOk, comAvailable, ps,
-  pending, deadCount, loadError, serverBusy, todayCount,
+  pending, deadCount, pendingBlocked, blockedHint, loadError, serverBusy, todayCount,
   refreshStatus, waitForSidecar, refreshTemplates, refreshDicts,
   flushQueue, retryDead, refreshToday, startPolling,
 } = useSidecarStatus({ theme, applyTheme })
@@ -278,6 +278,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <span class="me" :title="cfg?.employee_name || ''">{{ cfg?.employee_name || '未设置姓名' }}</span>
       <span v-if="!serverOk">服务器离线</span>
       <span v-if="pending > 0">待补传 {{ pending }} 条</span>
+      <!-- 配置受阻（Key/地址错）单独说清楚：旧版这些记录会被静默删掉，
+           员工只看到"待补传"归零以为成功了。现在记录留着，原因是配置。 -->
+      <span v-if="pendingBlocked > 0" class="blocked" :title="blockedHint">
+        其中 {{ pendingBlocked }} 条因配置受阻
+      </span>
       <span v-if="deadCount > 0" class="dead" :title="deadHint">死信 {{ deadCount }} 条</span>
       <div class="spacer" />
       <a v-if="pending > 0" class="link" @click="flushQueue">立即补传</a>

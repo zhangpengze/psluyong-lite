@@ -34,6 +34,8 @@ def register_status_routes(app: Flask, executor, _client) -> None:
         client = _client(cfg)
         from .config import app_data_dir
 
+        blocked = queue.blocked_items()
+
         return jsonify(
             {
                 "ok": True,
@@ -46,6 +48,10 @@ def register_status_routes(app: Flask, executor, _client) -> None:
                 "config": cfg.to_dict(),
                 "pending": len(queue.pending()),
                 "dead": len(queue.dead_letters()),
+                # 被环境/配置拦住的积压（401/403/404）：必须让员工看见原因，
+                # 否则"待补传 N 条"永远不减少，而根因在设置里的 API Key 或服务器地址
+                "pending_blocked": len(blocked),
+                "blocked_reason": blocked[0]["reason"] if blocked else "",
                 "machine": platform.node(),
                 "busy": executor.running_task() is not None,
                 # 版本与日志路径：员工报障时直接复制走，不用再问"你装的哪版"

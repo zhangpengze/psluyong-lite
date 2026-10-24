@@ -16,7 +16,13 @@ from flask import Flask, jsonify, request
 from core.ps_connector import COM_AVAILABLE  # noqa: E402
 
 from . import __version__, queue
-from .config import load_config, sanitize_config_patch, save_config
+from .config import (
+    ConfigBusyError,
+    last_recovery,
+    load_config,
+    sanitize_config_patch,
+    update_config,
+)
 from .ps_info import _resolve_ps
 
 logger = logging.getLogger(__name__)
@@ -57,6 +63,10 @@ def register_status_routes(app: Flask, executor, _client) -> None:
                 # 版本与日志路径：员工报障时直接复制走，不用再问"你装的哪版"
                 "version": __version__,
                 "log_dir": str(app_data_dir() / "logs"),
+                # 配置被自愈过（损坏→从备份恢复 / 重置为默认值）：
+                # 空字符串表示没事。界面只在非空时提示一次，免得员工
+                # 对着"服务器离线"瞎猜
+                "config_recovered": last_recovery(),
             }
         )
 
@@ -83,7 +93,6 @@ def register_status_routes(app: Flask, executor, _client) -> None:
     @app.post("/config")
     def set_config():
         payload = request.get_json(silent=True) or {}
-        cfg = load_config()
         clean, errors = sanitize_config_patch(payload)
         if errors:
             # 整包拒绝：只写一半会让配置文件处在"部分生效"的状态，
@@ -94,13 +103,19 @@ def register_status_routes(app: Flask, executor, _client) -> None:
                     {
                         "ok": False,
                         "error": "；".join(errors),
-                        "config": cfg.to_dict(),
+                        "config": load_config().to_dict(),
                     }
                 ),
                 400,
             )
-        for key, value in clean.items():
-            setattr(cfg, key, value)
-        save_config(cfg)
+        # 读-改-写在同一把锁里：窗口位置记忆、主题切换、别的窗口保存
+        # 可能正同时进来，分成 load/save 两步会互相覆盖
+        try:
+            cfg = update_config(clean)
+        except ConfigBusyError as e:
+            # 配置文件正被别的程序占着：宁可报"稍后重试"，也不能拿默认值
+            # 回写把员工的服务器地址和 Key 冲掉
+            logger.warning("配置保存失败：%s", e)
+            return jsonify({"ok": False, "error": str(e)}), 503
         logger.info("配置已保存 employee=%s server=%s", cfg.employee_name, cfg.server_url)
         return jsonify({"ok": True, "config": cfg.to_dict()})

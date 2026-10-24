@@ -159,6 +159,63 @@ def test_config_roundtrip(sc):
     assert load_config().jpg_quality == 8
 
 
+def test_status_survives_corrupt_config(sc, monkeypatch, tmp_path):
+    """配置文件被手工改坏（或写一半断电）时，接口不能整体 500。
+
+    旧行为：`{"output_dir": 123}` 一路 AttributeError，/status /config /export
+    全部 500，界面只剩"本地服务连接失败"，重启无效、界面上修不回来。
+    """
+    from client.sidecar import config as cfgmod
+
+    path = tmp_path / "broken" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"output_dir": 123,', encoding="utf-8")  # 半截 JSON
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", path)
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
+
+    resp = sc.get("/status")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["config"]["output_dir"] == ClientConfig().output_dir
+    assert "损坏" in data["config_recovered"]
+
+    # 坏文件还在（留档），并且已经写回一份能用的
+    assert list(path.parent.glob("config.broken-*.json"))
+    assert json.loads(path.read_text(encoding="utf-8"))["output_dir"]
+
+
+def test_config_post_repairs_wrong_type_field(sc, monkeypatch, tmp_path):
+    """手改出 `{"employee_name": 5}` 之后，设置页保存必须能把配置救回来"""
+    from client.sidecar import config as cfgmod
+
+    path = tmp_path / "typed" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"employee_name": 5, "api_key": "k1"}), encoding="utf-8")
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", path)
+
+    resp = sc.post("/config", json={"employee_name": "王五"})
+    assert resp.status_code == 200
+    saved = load_config()
+    assert saved.employee_name == "王五"
+    assert saved.api_key == "k1", "改一个字段不能把没坏的字段冲掉"
+
+
+def test_config_post_refuses_when_file_temporarily_unreadable(sc, monkeypatch, tmp_path):
+    """文件被别的程序占着时，宁可让员工点重试，也不能拿默认值回写"""
+    from client.sidecar import config as cfgmod
+
+    path = tmp_path / "busy" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"api_key": "k1"}), encoding="utf-8")
+    monkeypatch.setattr(cfgmod, "CONFIG_PATH", path)
+    monkeypatch.setattr(cfgmod, "_read_text_with_retry", lambda _p: (None, "共享冲突", True))
+
+    resp = sc.post("/config", json={"employee_name": "王五"})
+    assert resp.status_code == 503
+    assert "稍后重试" in resp.get_json()["error"]
+    assert json.loads(path.read_text(encoding="utf-8"))["api_key"] == "k1"
+
+
 def test_export_requires_fields(sc, configured):
     assert sc.post("/export", json={"author": "a", "title": "b"}).status_code == 400  # 缺模板
     assert sc.post("/export", json={"template_id": "t", "title": "b"}).status_code == 400  # 缺作者

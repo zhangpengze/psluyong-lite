@@ -45,7 +45,7 @@ export function useWindowControls(opts: WindowControlsOptions) {
     try {
       await setMainAlwaysOnTop(next)
       pinned.value = next
-      await api.saveConfig({ always_on_top: next })
+      await saveAndSync({ always_on_top: next })
     } catch {
       /* 置顶失败极少见，不打扰员工 */
     }
@@ -77,7 +77,24 @@ export function useWindowControls(opts: WindowControlsOptions) {
     openWindow(kind, x, y).catch(() => {})
   }
 
-  /** 定期把窗口位置存进配置，下次启动恢复 */
+  /**
+   * 保存配置并把结果合并回本地快照。
+   *
+   * 必须回写：`rememberWindowRect` 的"变了才写"是拿 cfg 里的旧坐标比的，
+   * 不回写的话比对永远成立，每个窗口 10 秒一次往磁盘写一遍完全相同的值
+   * ——三个窗口叠加就是每分钟十几次来回重写 config.json，纯属给文件写坏
+   * 制造机会。
+   */
+  async function saveAndSync(patch: Partial<ClientConfig>) {
+    try {
+      await api.saveConfig(patch)
+      if (opts.cfg.value) Object.assign(opts.cfg.value, patch)
+    } catch {
+      /* 位置/贴边记忆失败不打扰员工 */
+    }
+  }
+
+  /** 定期把窗口位置存进配置，下次启动恢复（值没变就不写） */
   async function rememberWindowRect() {
     if (!hasTauri() || docked.value) return
     const rect = await getWindowRect()
@@ -85,14 +102,14 @@ export function useWindowControls(opts: WindowControlsOptions) {
     const [x, y] = rect
     if (opts.route.value === 'history') {
       if (x !== opts.cfg.value?.history_win_x || y !== opts.cfg.value?.history_win_y) {
-        await api.saveConfig({ history_win_x: x, history_win_y: y })
+        await saveAndSync({ history_win_x: x, history_win_y: y })
       }
     } else if (opts.route.value === 'settings') {
       if (x !== opts.cfg.value?.settings_win_x || y !== opts.cfg.value?.settings_win_y) {
-        await api.saveConfig({ settings_win_x: x, settings_win_y: y })
+        await saveAndSync({ settings_win_x: x, settings_win_y: y })
       }
     } else if (x !== opts.cfg.value?.win_x || y !== opts.cfg.value?.win_y) {
-      await api.saveConfig({ win_x: x, win_y: y })
+      await saveAndSync({ win_x: x, win_y: y })
     }
   }
 
@@ -137,7 +154,7 @@ export function useWindowControls(opts: WindowControlsOptions) {
     listenDockChanged((side) => {
       docked.value = side !== null
       // 只记住"贴在哪一边"：设置里已经不提供方向选择，这项纯粹是下次启动还原用
-      api.saveConfig({ dock_side: side ?? '' }).catch(() => {})
+      saveAndSync({ dock_side: side ?? '' })
     })
     rectTimer = window.setInterval(rememberWindowRect, 10_000)
 

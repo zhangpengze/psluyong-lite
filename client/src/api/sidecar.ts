@@ -153,6 +153,8 @@ export const api = {
       machine: string
       version: string
       log_dir: string
+      /** 配置被自愈过（损坏→从备份恢复 / 重置默认值）的说明，空串=没事 */
+      config_recovered?: string
     }>('/status'),
 
   /** 重新识别本机 Photoshop（装完/换版本后点一下） */

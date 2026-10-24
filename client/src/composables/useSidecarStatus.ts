@@ -48,6 +48,8 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   const serverBusy = ref(false)
   // 记录窗今日生成数（HistoryPanel 回传 / 自己拉，用于托盘气泡）
   const todayCount = ref(0)
+  /** 配置自愈提示只弹一次（每个窗口的进程各一次） */
+  let recoveryNotified = false
 
   /**
    * @param quiet 静默失败：轮询时不弹大错误条（离线有状态点表达），
@@ -66,6 +68,13 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
       blockedReason.value = s.blocked_reason ?? ''
       serverBusy.value = !!s.busy
       loadError.value = ''
+      // 配置被自愈过（文件损坏）只提示一次：员工需要知道"Key 可能要重填"，
+      // 但每 60 秒弹一遍就是骚扰。进程内只弹一次，重启后由 sidecar 重新给。
+      const recovered = (s.config_recovered ?? '').trim()
+      if (recovered && !recoveryNotified) {
+        recoveryNotified = true
+        toast(`${recovered}。请在「设置 → 账号」核对服务器地址和 API Key`, 'warning')
+      }
       // 主题以服务端配置为准（换机器/重装不丢偏好）
       const next = s.config.theme === 'light' ? 'light' : 'dark'
       if (next !== opts.theme.value) opts.applyTheme(next)

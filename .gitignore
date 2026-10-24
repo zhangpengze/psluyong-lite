@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 .env
+# 环境文件的所有变体与备份一律不入库（.env.local/.env.bak.ci/.env.prod 等），
+# 只放行模板。真实教训：复现 CI「没有 .env」时 `cp .env .env.bak.ci`，
+# 该文件被 git add -A 带进公开仓库，密钥类配置差点泄出去。
+.env.*
+!.env.example
 server/data/
 *.db
 .pytest_cache/

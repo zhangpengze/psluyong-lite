@@ -309,6 +309,53 @@ def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, s
     return _post_with_retry("send_group_msg", payload, "失败告警")
 
 
+# 运维告警（备份失败 / 镜像失败 / 磁盘超阈值 / 日报未推送）与"员工录用失败"
+# 是两类信息，用**各自独立**的节流器：否则凌晨备份失败会被白天的录用失败
+# 告警挤掉，反之亦然。运维类本来就不频繁，5 分钟窗口足够去重。
+_ops_lock = threading.Lock()
+_ops_last_alert_at: float = 0.0
+OPS_ALERT_MIN_INTERVAL_S = 300
+
+
+def reset_ops_alert_throttle() -> None:
+    """测试用：清空运维告警节流"""
+    global _ops_last_alert_at
+    with _ops_lock:
+        _ops_last_alert_at = 0.0
+
+
+def push_ops_alert(title: str, detail: str = "") -> tuple[bool, str]:
+    """系统级问题告警。
+
+    这些东西以前只写进日志：容器日志一轮转就消失，而"备份连续失败三天"
+    "日报根本没推出去"恰恰是没人会主动去看的那类问题。宁可推一条群消息。
+    """
+    from server.app.config import Config
+
+    global _ops_last_alert_at
+
+    if not Config.ALERT_ON_OPS_FAILURE:
+        return False, "运维告警已关闭（ALERT_ON_OPS_FAILURE=0）"
+    if not Config.NAPCAT_WEBHOOK or not Config.REPORT_GROUP_ID:
+        # 没接机器人时只记日志，不报错——本地开发不该因为这条炸掉
+        logger.warning("运维告警未发送（未配置推送）：%s｜%s", title, detail)
+        return False, "未配置推送通道"
+
+    now = time.monotonic()
+    with _ops_lock:
+        if now - _ops_last_alert_at < OPS_ALERT_MIN_INTERVAL_S:
+            return False, "运维告警间隔内，已抑制"
+        _ops_last_alert_at = now
+
+    content = f"【系统告警】{title}\n{detail}\n时间：{datetime.now():%m-%d %H:%M}"
+    group_id = Config.REPORT_GROUP_ID
+    payload = {
+        "group_id": int(group_id) if group_id.isdigit() else group_id,
+        "message": [{"type": "text", "data": {"text": content}}],
+    }
+    return _post_with_retry("send_group_msg", payload, "运维告警")
+
+
 def save_push_status(day: date, status: dict) -> Path:
     """推送状态落盘到 reports/<日期>.status.json。
 

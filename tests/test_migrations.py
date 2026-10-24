@@ -67,5 +67,31 @@ def test_migration_drops_deprecated_dedup_index(app):
 
         names = {i["name"] for i in inspect(db.engine).get_indexes("records")}
         assert "uq_records_date_author_title_active" not in names
-        assert "uq_records_dedup_active" in names
+        assert "uq_records_dedup_success" in names
         assert "drop-index:uq_records_date_author_title_active" in applied
+
+
+def test_migration_replaces_old_active_dedup_index(app):
+    """上一版留下的 uq_records_dedup_active 也要删：它不区分 status，
+    会继续把"失败后重试"拦成 409。新索引只约束成功记录。"""
+    with app.app_context():
+        db.session.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_records_dedup_active "
+                "ON records (work_date, employee_name, template_name, author, title) "
+                "WHERE is_deleted = 0"
+            )
+        )
+        db.session.commit()
+
+        run_migrations()
+
+        names = {i["name"] for i in inspect(db.engine).get_indexes("records")}
+        assert "uq_records_dedup_active" not in names
+        assert "uq_records_dedup_success" in names
+
+        # 新索引必须是"只约束成功记录"的部分索引
+        ddl = db.session.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_records_dedup_success'")
+        ).scalar()
+        assert ddl and "status" in ddl and "success" in ddl

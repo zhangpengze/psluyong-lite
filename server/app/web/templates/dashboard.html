@@ -1,198 +1,56 @@
 {% extends "base.html" %}
 {% set active = 'dashboard' %}
-{% block title %}仪表盘{% endblock %}
+{% block title %}数据概览{% endblock %}
 
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>仪表盘</h1>
-    <div class="sub">{{ today }} · 今日录用与近 7 天趋势</div>
-  </div>
-  <div class="actions">
-    <a class="btn ghost" href="{{ url_for('web.records') }}">查看全部记录</a>
-  </div>
-</div>
-
-<div class="grid grid-4">
-  <div class="kpi blue">
-    <div class="label">今日录用</div>
-    <div class="value">{{ today_stats.total }}</div>
-    <div class="hint">近 7 天共 {{ week_stats.total }} 条</div>
-  </div>
-  <div class="kpi green">
-    <div class="label">今日成功</div>
-    <div class="value">{{ today_stats.success }}</div>
-    <div class="hint">成功率 {{ today_stats.success_rate }}%</div>
-  </div>
-  {# 失败数可点：直接跳到已筛好"今天 + 失败"的记录列表，省两步操作 #}
-  <a class="kpi {{ 'red' if today_stats.failed else '' }}"
-     href="{{ url_for('web.records', start=today, end=today, status='failed') }}"
-     aria-label="今日失败 {{ today_stats.failed }} 条，查看失败记录">
-    <div class="label">今日失败</div>
-    <div class="value">{{ today_stats.failed }}</div>
-    <div class="hint">{{ '点击查看失败明细' if today_stats.failed else '无失败记录' }}</div>
-  </a>
-  <div class="kpi">
-    <div class="label">今日活跃员工</div>
-    <div class="value">{{ by_employee|length }}</div>
-    <div class="hint">使用模板 {{ by_template|length }} 个</div>
-  </div>
-</div>
-
-<div class="grid grid-2 mt-14">
-  <div class="card">
-    <h2>近 7 天录用趋势</h2>
-    <div class="spark" role="img"
-         aria-label="近 7 天每日录用条数：{% for p in series %}{{ p.date.strftime('%m-%d') }} {{ p.count }} 条{% if not loop.last %}，{% endif %}{% endfor %}">
-      {% for p in series %}
-        <div class="col" title="{{ p.date }} · {{ p.count }} 条">
-          <div class="cnt">{{ p.count if p.count else '' }}</div>
-          <div class="bar-area">
-            <div class="bar {{ 'zero' if p.count == 0 }}" style="height: {{ (p.count / peak * 100)|round(1) }}%"></div>
-          </div>
-          <div class="lbl">{{ p.date.strftime('%m-%d') }}</div>
-        </div>
-      {% endfor %}
+{# 首屏由服务端直出（panels.py 生成片段）；dashboard.js 负责切换时间范围、
+   30 秒轮询与伙伴行展开，轮询回来的是同一套片段，原地替换。 #}
+<div id="dashboard-root" data-range="{{ ov.range.preset }}" data-start="{{ ov.range.start }}" data-end="{{ ov.range.end }}">
+  <div class="page-head">
+    <div>
+      <h1>数据概览</h1>
+      <div class="sub">{{ ov.range.label }} · 模板调用与合作伙伴活跃度 · <span class="updated" id="last-updated">最后更新于 {{ ov.updated_at }}</span></div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" id="export-overview" href="/api/v1/stats/overview/export?range={{ ov.range.preset }}{% if ov.range.preset == 'custom' %}&start={{ ov.range.start }}&end={{ ov.range.end }}{% endif %}">导出概览 CSV</a>
+      <button type="button" class="btn ghost sm" id="refresh-btn">刷新</button>
+      <a class="btn ghost" id="all-records-link" href="/records?start={{ ov.range.start }}&end={{ ov.range.end }}">查看全部记录</a>
     </div>
   </div>
 
-  <div class="card">
-    <h2>今日按员工</h2>
-    {% if by_employee %}
-      <div class="bars">
-        {% set emax = by_employee[0].count or 1 %}
-        {% for item in by_employee %}
-          <div class="bar-row">
-            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
-            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / emax * 100)|round(1) }}%"></div></div>
-            <div class="val">{{ item.count }}</div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="empty">今天还没有录用记录</div>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>今日按模板</h2>
-    {% if by_template %}
-      <div class="bars">
-        {% set tmax = by_template[0].count or 1 %}
-        {% for item in by_template %}
-          <div class="bar-row">
-            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
-            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / tmax * 100)|round(1) }}%"></div></div>
-            <div class="val">{{ item.count }}</div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="empty">今天还没有录用记录</div>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>今日按合作伙伴</h2>
-    {% if by_partner %}
-      <div class="bars">
-        {% set pmax = by_partner[0].count or 1 %}
-        {% for item in by_partner %}
-          <div class="bar-row">
-            <div class="name" title="{{ item.name }}">{{ item.name }}</div>
-            <div class="bar-track"><div class="bar-fill" style="width: {{ (item.count / pmax * 100)|round(1) }}%"></div></div>
-            <div class="val">{{ item.count }}</div>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="empty">今天还没有录用记录</div>
-    {% endif %}
-  </div>
-</div>
-
-<div class="card mt-14">
-  <h2>最近 8 条记录</h2>
-  {% if recent %}
-    <div class="table-wrap short">
-      <table>
-        <caption class="sr-only">最近提交的 8 条录用记录</caption>
-        <thead>
-          <tr><th scope="col">图片</th><th scope="col">时间</th><th scope="col">员工</th>
-            <th scope="col">模板</th><th scope="col">合作伙伴</th><th scope="col">作者</th>
-            <th scope="col">标题</th><th scope="col">状态</th></tr>
-        </thead>
-        <tbody>
-          {% for r in recent %}
-            <tr>
-              <td>
-                {% if r.thumb_path or r.image_path %}
-                  <img class="thumb" loading="lazy" decoding="async" width="46" height="46"
-                       src="{{ url_for('records.get_record_image', record_id=r.id, thumb=1 if r.thumb_path else 0) }}"
-                       data-full="{{ url_for('records.get_record_image', record_id=r.id) }}"
-                       data-alt="{{ r.author }}《{{ r.title }}》成品图"
-                       alt="预览 {{ r.author }}《{{ r.title }}》">
-                {% else %}
-                  <div class="noimg" role="img" aria-label="无图片">无图</div>
-                {% endif %}
-              </td>
-              <td class="num">{{ r.created_at|localtime }}</td>
-              <td>{{ r.employee_name }}</td>
-              <td>{{ r.template_name }}</td>
-              <td>{{ r.partner_name or '-' }}</td>
-              <td>{{ r.author }}</td>
-              <td class="clip" title="{{ r.title }}">{{ r.title }}</td>
-              <td><span class="tag {{ 'ok' if r.status == 'success' else 'bad' }}">{{ '成功' if r.status == 'success' else '失败' }}</span></td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    <div class="empty">
-      <div class="empty-title">还没有任何记录</div>
-      <div>员工客户端生成后会自动出现在这里</div>
-    </div>
-  {% endif %}
-</div>
-
-{# 系统自身状态：业务指标再好看，备份挂了 / 日报没推 / 磁盘塞满也是白搭 #}
-<div class="card mt-14">
-  <div class="statusbar" role="status" aria-label="系统状态">
-    <span class="item">
-      <span class="dot {{ 'bad' if not system.last_backup else ('warn' if system.last_backup.stale else 'ok') }}" aria-hidden="true"></span>
-      {% if system.last_backup %}
-        最后备份 {{ system.last_backup.age_text }}（{{ system.last_backup.at_text }} · 共 {{ system.last_backup.count }} 份）
-      {% else %}
-        还没有数据库备份，建议先跑一次 <code>python -m server.backup</code>
-      {% endif %}
+  <div class="range-bar" id="range-bar" role="group" aria-label="时间范围">
+    <button type="button" class="chip {{ 'active' if ov.range.preset == 'today' }}" data-range="today" aria-pressed="{{ 'true' if ov.range.preset == 'today' else 'false' }}">今天</button>
+    <button type="button" class="chip {{ 'active' if ov.range.preset == 'yesterday' }}" data-range="yesterday" aria-pressed="{{ 'true' if ov.range.preset == 'yesterday' else 'false' }}">昨天</button>
+    <button type="button" class="chip {{ 'active' if ov.range.preset == '7d' }}" data-range="7d" aria-pressed="{{ 'true' if ov.range.preset == '7d' else 'false' }}">近 7 天</button>
+    <button type="button" class="chip {{ 'active' if ov.range.preset == '30d' }}" data-range="30d" aria-pressed="{{ 'true' if ov.range.preset == '30d' else 'false' }}">近 30 天</button>
+    <span class="range-custom">
+      <input type="date" id="custom-start" aria-label="自定义开始日期" value="{{ ov.range.start if ov.range.preset == 'custom' else '' }}">
+      <span class="range-sep">至</span>
+      <input type="date" id="custom-end" aria-label="自定义结束日期" value="{{ ov.range.end if ov.range.preset == 'custom' else '' }}">
+      <button type="button" class="chip" id="custom-apply">应用</button>
     </span>
-
-    <span class="sep" aria-hidden="true">|</span>
-
-    <span class="item">
-      {% if system.yesterday_push %}
-        <span class="dot {{ 'ok' if system.yesterday_push.pushed else 'bad' }}" aria-hidden="true"></span>
-        {{ system.yesterday_push.date }} 日报{{ '已推送' if system.yesterday_push.pushed else '推送失败' }}
-        {% if not system.yesterday_push.pushed and system.yesterday_push.message %}
-          <span class="muted" title="{{ system.yesterday_push.message }}">· {{ system.yesterday_push.message }}</span>
-        {% endif %}
-      {% else %}
-        <span class="dot warn" aria-hidden="true"></span>
-        {{ yesterday }} 日报没有推送记录
-      {% endif %}
-    </span>
-
-    <span class="sep" aria-hidden="true">|</span>
-
-    <span class="item">
-      <span class="dot ok" aria-hidden="true"></span>
-      图片 {{ system.image_count }} 张 · {{ system.image_bytes|filesize }}
-    </span>
-
-    <span class="sep" aria-hidden="true">|</span>
-
-    <a href="{{ url_for('web.audit') }}">操作日志</a>
   </div>
+  <div class="range-error" id="range-error" role="alert" hidden></div>
+
+  <div class="grid grid-4" id="kpi-row">{{ ov.html.kpi | safe }}</div>
+
+  <div class="grid grid-2 mt-14">
+    <div class="card" id="trend-card">{{ ov.html.trend | safe }}</div>
+    <div class="card" id="top-card">{{ ov.html.top | safe }}</div>
+  </div>
+
+  <div class="card mt-14">
+    <h2>合作伙伴明细 <span class="card-meta">按区间调用排序 · 点行展开看每个模板用了几次</span></h2>
+    <div id="partner-table-box">{{ ov.html.table | safe }}</div>
+    <div id="table-note-box">{{ ov.html.note | safe }}</div>
+  </div>
+
+  {# 系统自身状态：业务指标再好看，备份挂了、日报没推、磁盘满也是白搭。
+     卡片由 panels.status_html 整体生成（含标题与操作日志入口） #}
+  <div class="mt-14" id="system-status-box">{{ ov.html.status | safe }}</div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='dashboard.js', v=asset_version()) }}"></script>
 {% endblock %}

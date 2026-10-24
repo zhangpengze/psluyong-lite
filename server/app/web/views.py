@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -18,14 +17,16 @@ from flask import (
     session,
     url_for,
 )
-from sqlalchemy import func
 
 from ..audit import ACTION_LABELS, log_action
 from ..auth import admin_required, current_user, generate_csrf_token, login_required
 from ..db import db
-from ..models import STATUS_FAILED, AdminUser, Record
+from ..models import AdminUser, Record
+from ..overview import RangeError, get_overview, parse_limit, parse_range
+from ..panels import overview_html
 from ..ratelimit import hit as rate_hit
 from ..ratelimit import reset as rate_reset
+from ..search import LIKE_ESCAPE, like_contains
 
 bp = Blueprint("web", __name__)
 logger = logging.getLogger(__name__)
@@ -54,127 +55,6 @@ def _parse_date(value: str | None, default: date) -> date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         return default
-
-
-def _totals(start: date, end: date) -> dict:
-    base = db.session.query(func.count(Record.id)).filter(
-        Record.is_deleted.is_(False),
-        Record.work_date >= start,
-        Record.work_date <= end,
-    )
-    total = base.scalar() or 0
-    failed = base.filter(Record.status == STATUS_FAILED).scalar() or 0
-    return {
-        "total": total,
-        "success": total - failed,
-        "failed": failed,
-        "success_rate": round((total - failed) / total * 100, 1) if total else 0.0,
-    }
-
-
-def _group_count(start: date, end: date, column, limit: int = 8) -> list[dict]:
-    rows = (
-        db.session.query(column, func.count(Record.id))
-        .filter(
-            Record.is_deleted.is_(False),
-            Record.work_date >= start,
-            Record.work_date <= end,
-            column.isnot(None),
-            column != "",
-        )
-        .group_by(column)
-        .order_by(func.count(Record.id).desc())
-        .limit(limit)
-        .all()
-    )
-    return [{"name": name, "count": count} for name, count in rows]
-
-
-# 系统状态缓存：目录遍历有成本，30 秒内复用同一份结果。
-# 数据还空着时只缓存 5 秒——刚灌完第一批记录就刷新页面，
-# 不该看到"图片 0 张"这种明显过期的数字。
-_STATUS_CACHE: dict = {"at": 0.0, "ttl": 0.0, "data": None}
-_STATUS_TTL = 30.0
-_STATUS_TTL_EMPTY = 5.0
-
-
-def _dir_usage(root: Path) -> tuple[int, int]:
-    """递归统计文件数与总字节，坏掉的软链/权限错误直接跳过"""
-    files = total = 0
-    if not root.exists():
-        return 0, 0
-    for entry in root.rglob("*"):
-        try:
-            if entry.is_file():
-                files += 1
-                total += entry.stat().st_size
-        except OSError:
-            continue
-    return files, total
-
-
-def _human_age(hours: float) -> str:
-    if hours < 1:
-        return f"{max(1, int(hours * 60))} 分钟前"
-    if hours < 24:
-        return f"{int(hours)} 小时前"
-    return f"{int(hours // 24)} 天前"
-
-
-def _system_status() -> dict:
-    """仪表盘底部那条"系统自己好不好"。
-
-    业务指标再漂亮，备份挂了、日报没推、磁盘塞满也是白搭——
-    这三件事以前只能 SSH 上去看，现在一眼可见。
-    """
-    now = time.monotonic()
-    if _STATUS_CACHE["data"] is not None and now - _STATUS_CACHE["at"] < _STATUS_CACHE["ttl"]:
-        return _STATUS_CACHE["data"]
-
-    from ..config import BACKUP_DIR, DATA_DIR, IMAGES_DIR
-
-    backups = sorted(BACKUP_DIR.glob("*.db.gz"), reverse=True) if BACKUP_DIR.exists() else []
-    last_backup = None
-    if backups:
-        latest = backups[0]
-        try:
-            mtime = datetime.fromtimestamp(latest.stat().st_mtime)
-            age = (datetime.now() - mtime).total_seconds() / 3600
-            last_backup = {
-                "name": latest.name,
-                "at_text": mtime.strftime("%m-%d %H:%M"),
-                "age_text": _human_age(age),
-                "stale": age > 36,  # 每天一备，超过 36 小时没备上就该看
-                "count": len(backups),
-            }
-        except OSError:
-            last_backup = None
-
-    yesterday = date.today() - timedelta(days=1)
-    status_file = DATA_DIR / "reports" / f"{yesterday:%Y-%m-%d}.status.json"
-    yesterday_push = None
-    if status_file.exists():
-        try:
-            payload = json.loads(status_file.read_text(encoding="utf-8"))
-            yesterday_push = {
-                "date": yesterday.isoformat(),
-                "pushed": bool(payload.get("pushed")),
-                "message": (payload.get("message") or "")[:80],
-            }
-        except (OSError, ValueError):
-            yesterday_push = None
-
-    image_count, image_bytes = _dir_usage(IMAGES_DIR)
-
-    data = {
-        "last_backup": last_backup,
-        "yesterday_push": yesterday_push,
-        "image_count": image_count,
-        "image_bytes": image_bytes,
-    }
-    ttl = _STATUS_TTL if (image_count or backups) else _STATUS_TTL_EMPTY
-    _STATUS_CACHE.update(at=now, ttl=ttl, data=data)
-    return data
 
 
 @bp.get("/")
@@ -246,44 +126,20 @@ def logout():
 @bp.get("/dashboard")
 @login_required
 def dashboard():
-    today = date.today()
-    start = today - timedelta(days=6)
+    """数据概览：KPI + 趋势 + 合作伙伴明细，首屏服务端直出。
 
-    trend_rows = (
-        db.session.query(Record.work_date, func.count(Record.id))
-        .filter(
-            Record.is_deleted.is_(False),
-            Record.work_date >= start,
-            Record.work_date <= today,
-        )
-        .group_by(Record.work_date)
-        .all()
-    )
-    counted = {d: c for d, c in trend_rows}
-    series, cursor = [], start
-    while cursor <= today:
-        series.append({"date": cursor, "count": counted.get(cursor, 0)})
-        cursor += timedelta(days=1)
+    时间范围来自 URL（range/start/end），与 /api/v1/stats/overview 同一套
+    解析；非法区间不白屏，flash 提示后回退默认的「近 7 天」。
+    """
+    try:
+        start, end, label, preset = parse_range(request.args)
+    except RangeError as e:
+        flash(str(e), "error")
+        start, end, label, preset = parse_range({"range": "7d"})
 
-    peak = max((p["count"] for p in series), default=0) or 1
-
-    return render_template(
-        "dashboard.html",
-        today=today,
-        today_stats=_totals(today, today),
-        week_stats=_totals(start, today),
-        series=series,
-        peak=peak,
-        by_employee=_group_count(today, today, Record.employee_name),
-        by_template=_group_count(today, today, Record.template_name),
-        by_partner=_group_count(today, today, Record.partner_name),
-        recent=Record.query.filter(Record.is_deleted.is_(False))
-        .order_by(Record.created_at.desc())
-        .limit(8)
-        .all(),
-        system=_system_status(),
-        yesterday=today - timedelta(days=1),
-    )
+    ov = dict(get_overview(start, end, label, preset))
+    ov["html"] = overview_html(ov, parse_limit(request.args))
+    return render_template("dashboard.html", ov=ov)
 
 
 # ========== 记录列表 ==========
@@ -313,13 +169,19 @@ def records():
     if status:
         query = query.filter(Record.status == status)
     if keyword:
-        like = f"%{keyword}%"
+        # 必须走 like_contains + escape：直接 f"%{keyword}%" 会让 SQLite 把
+        # 关键词里的 % 和 _ 当通配符，主管搜「50%」等于把全表捞出来当搜索结果。
+        # 这条规则和 API 接口共用同一份实现（server/app/search.py）。
+        like = like_contains(keyword)
         query = query.filter(
             db.or_(
-                Record.author.like(like),
-                Record.title.like(like),
-                Record.partner_name.like(like),
-                Record.template_name.like(like),
+                Record.author.like(like, escape=LIKE_ESCAPE),
+                Record.title.like(like, escape=LIKE_ESCAPE),
+                Record.partner_name.like(like, escape=LIKE_ESCAPE),
+                Record.template_name.like(like, escape=LIKE_ESCAPE),
+                # 员工名也要能搜：API 侧一直支持，后台页面原来漏了，
+                # 同一个词在两边给出不同结果会让人怀疑数据。
+                Record.employee_name.like(like, escape=LIKE_ESCAPE),
             )
         )
 

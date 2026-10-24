@@ -172,3 +172,55 @@ def test_csrf_meta_and_asset_version(admin_client):
     html = admin_client.get("/dashboard").get_data(as_text=True)
     assert re.search(r'<meta name="csrf-token" content="[^"]+"', html)
     assert re.search(r"app\.css\?v=\d+", html), "静态资源缺少版本号，改样式后用户会看到旧缓存"
+
+
+def _seed_records(app, rows) -> None:
+    """直接落库：这些用例只关心后台页面的筛选 SQL，不需要走一遍上传"""
+    from datetime import date
+
+    from server.app.db import db
+    from server.app.models import Record
+
+    with app.app_context():
+        for author, title in rows:
+            db.session.add(
+                Record(
+                    work_date=date.today(),
+                    employee_name="张三",
+                    template_name="农业",
+                    author=author,
+                    title=title,
+                    status="success",
+                )
+            )
+        db.session.commit()
+
+
+def test_records_page_escapes_like_wildcards(admin_client, clean_db, app):
+    """搜 % 不能把全表捞出来。
+
+    原来 views.py 直接拼 f"%{q}%"，SQLite 把 % 和 _ 当通配符：
+    主管搜「50%」看到的是"全部记录"，会拿着错的结果去对账。
+    """
+    _seed_records(app, [("王五", "占比50%的样本"), ("李四", "普通标题"), ("赵六", "另有其一")])
+
+    total = admin_client.get("/records").get_data(as_text=True)
+    assert "共 3 条" in total
+
+    # 只有一个标题里真的含字面 % —— 未转义时这里会返回 3
+    assert "共 1 条" in admin_client.get("/records", query_string={"q": "%"}).get_data(as_text=True)
+    # 没有标题含下划线 —— 未转义时 _ 能匹配任意单字符，会返回 3
+    assert "共 0 条" in admin_client.get("/records", query_string={"q": "_"}).get_data(as_text=True)
+    # 「50%样本」不是任何标题的子串 —— 未转义时 % 当通配符会误命中「50%的样本」
+    assert "共 0 条" in admin_client.get(
+        "/records", query_string={"q": "50%样本"}
+    ).get_data(as_text=True)
+
+
+def test_records_page_keyword_matches_employee_name(admin_client, clean_db, app):
+    """后台搜索要能搜到员工名：API 侧一直支持，页面漏了会让两边结果不一致"""
+    _seed_records(app, [("王五", "标题一")])
+
+    assert "共 1 条" in admin_client.get(
+        "/records", query_string={"q": "张三"}
+    ).get_data(as_text=True)

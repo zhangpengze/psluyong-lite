@@ -1,8 +1,13 @@
-"""图片路径解析：换机迁移后老绝对路径必须还能找到文件"""
+"""图片路径解析与上传校验：换机迁移后老绝对路径必须还能找到文件"""
 
 from __future__ import annotations
 
+from datetime import date
+from io import BytesIO
 from pathlib import Path
+
+import pytest
+from werkzeug.datastructures import FileStorage
 
 from server.app import storage
 
@@ -71,3 +76,50 @@ def test_delete_image_uses_resolver(tmp_path, monkeypatch):
 
     storage.delete_image("/app/data/images/2026/10/21/abc.jpg", None)
     assert not target.exists()
+
+
+def test_save_image_rejects_fake_image(tmp_path, monkeypatch):
+    """改了扩展名的非图片必须被拒。
+
+    原来只按扩展名放行，images/ 目录会慢慢混进打不开的"图片"：
+    后台点开全是裂图，而备份还在每天忠实地镜像这些垃圾。
+    """
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    fake = FileStorage(stream=BytesIO(b"MZ\x90\x00 this is an exe, not a jpg"), filename="evil.jpg")
+
+    with pytest.raises(storage.ImageValidationError):
+        storage.save_image(fake, date.today())
+
+    # 落盘后校验失败必须把文件删掉，不能留垃圾
+    # （空的年/月/日 目录留着无妨，一天最多一个）
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+
+
+def test_save_image_rejects_renamed_psd(tmp_path, monkeypatch):
+    """psd 曾经在成品图白名单里，改成 .jpg 就能塞进图片目录"""
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    psd = FileStorage(stream=BytesIO(b"8BPS" + b"\0" * 64), filename="template.jpg")
+
+    with pytest.raises(storage.ImageValidationError):
+        storage.save_image(psd, date.today())
+
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+
+
+def test_save_image_accepts_real_image(tmp_path, monkeypatch):
+    """正常图片照旧：这次改动不能把真图挡在门外"""
+    from PIL import Image
+
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    buf = BytesIO()
+    Image.new("RGB", (900, 600), (10, 20, 30)).save(buf, "JPEG")
+    buf.seek(0)
+
+    image_path, thumb_path, name = storage.save_image(
+        FileStorage(stream=buf, filename="成品.jpg"), date.today()
+    )
+
+    assert name == "成品.jpg"
+    assert (tmp_path / image_path).exists()
+    assert thumb_path, "JPEG 必须生成缩略图"
+    assert (tmp_path / thumb_path).exists()

@@ -118,3 +118,55 @@ def test_verify_rejects_db_missing_core_tables(env, tmp_path: Path):
     _make_db(target)
     with pytest.raises(RuntimeError, match="核心表"):
         restore_backup(archives, target)
+
+
+# ==================== 成品图镜像 ====================
+
+
+def test_mirror_images_copies_once_then_skips(tmp_path):
+    """首次全量复制，第二次只补新增；已存在的同大小文件不重拷"""
+    from server.backup import mirror_images
+
+    src = tmp_path / "images"
+    dst = tmp_path / "mirror"
+    (src / "2026" / "10" / "23").mkdir(parents=True)
+    (src / "2026" / "10" / "23" / "a.jpg").write_bytes(b"x" * 100)
+    (src / "2026" / "10" / "23" / "b.jpg").write_bytes(b"y" * 50)
+
+    first = mirror_images(src, dst)
+    assert first["copied"] == 2 and first["failed"] == 0
+    assert (dst / "2026" / "10" / "23" / "a.jpg").read_bytes() == b"x" * 100
+
+    # 再跑一次：全部跳过，不重复写
+    second = mirror_images(src, dst)
+    assert second["copied"] == 0 and second["skipped"] == 2
+
+    # 新增一张：只补这一张
+    (src / "2026" / "10" / "23" / "c.jpg").write_bytes(b"z" * 10)
+    third = mirror_images(src, dst)
+    assert third["copied"] == 1
+    assert (dst / "2026" / "10" / "23" / "c.jpg").exists()
+
+
+def test_mirror_images_overwrites_changed_size(tmp_path):
+    """同文件名但大小变了（重出图）要覆盖，不能因为"目标已存在"就跳过"""
+    from server.backup import mirror_images
+
+    src = tmp_path / "images"
+    dst = tmp_path / "mirror"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"1" * 10)
+    mirror_images(src, dst)
+
+    (src / "a.jpg").write_bytes(b"2" * 99)
+    result = mirror_images(src, dst)
+    assert result["copied"] == 1
+    assert (dst / "a.jpg").read_bytes() == b"2" * 99
+
+
+def test_mirror_images_missing_source_raises(tmp_path):
+    from server.backup import mirror_images
+
+    with pytest.raises(FileNotFoundError):
+        mirror_images(tmp_path / "nope", tmp_path / "mirror")
+

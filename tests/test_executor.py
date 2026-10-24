@@ -187,3 +187,82 @@ def test_status_file_survives_torn_write(tmp_path: Path):
     bad = tmp_path / "params.json"
     bad.write_text('{"template_path": "截断', encoding="utf-8")
     assert read_json(bad) is None
+
+
+def test_cancel_writes_cancelled_state_and_kills_worker(tmp_path: Path, monkeypatch):
+    """取消必须落成确定的终态，而不是"结果未知"。
+
+    顺序错了（先杀进程再写终态）的话 status() 会先看到进程消失、读不到
+    status.json，判成 uncertain，员工被通知"可能已经生成了一张图"，
+    然后跑去输出目录翻文件——他只是点了个取消。
+    """
+    ex = Executor()
+    spawned: list[subprocess.Popen] = []
+
+    def never_finishing(self, task_dir):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(Executor, "_spawn_worker", never_finishing)
+
+    task_id = ex.start(_make_params(tmp_path))
+    ok, message = ex.cancel(task_id)
+    assert ok, message
+
+    # 进程真的被杀掉了
+    assert spawned and spawned[0].wait(timeout=10) is not None
+
+    status = ex.status(task_id)
+    assert status["state"] == "cancelled"
+    assert status["finished"] is True
+    assert status["success"] is False
+    assert "已取消" in status["message"]
+    # 锁必须释放，员工能立刻重试
+    assert ex.running_task() is None
+
+
+def test_cancel_unknown_task_is_soft_failure(tmp_path: Path):
+    """取消一个已经结束的任务：返回 False 而不是抛异常"""
+    ex = Executor()
+    ok, message = ex.cancel("不存在的-task-id")
+    assert ok is False
+    assert message
+
+
+def test_cancel_then_start_again(tmp_path: Path):
+    """取消之后必须能立刻再开一个任务，否则员工就卡死了"""
+    ex = Executor()
+
+    import client.sidecar.executor as executor_mod
+
+    real_spawn = executor_mod.Executor._spawn_worker
+
+    def slow_then_real(self, task_dir):
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    executor_mod.Executor._spawn_worker = slow_then_real
+    try:
+        task_id = ex.start(_make_params(tmp_path))
+        assert ex.cancel(task_id)[0] is True
+        assert ex.running_task() is None
+    finally:
+        executor_mod.Executor._spawn_worker = real_spawn
+
+    # 取消后重新提交：这次走真 worker（模板不存在 → 失败终态），
+    # 只要没抛 BusyError 就说明锁已经放干净了
+    second = ex.start(_make_params(tmp_path))
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if ex.status(second).get("finished"):
+            return
+        time.sleep(0.2)
+    raise AssertionError("取消后重新提交的任务没有出终态")

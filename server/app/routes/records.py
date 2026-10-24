@@ -17,7 +17,9 @@ from ..audit import log_action
 from ..auth import admin_required, api_key_required, api_or_session, csrf_protect, current_user
 from ..db import db, utcnow
 from ..models import STATUS_FAILED, STATUS_SUCCESS, Record
-from ..storage import delete_image, save_image
+from ..overview import invalidate as invalidate_overview
+from ..search import LIKE_ESCAPE, like_contains
+from ..storage import ImageValidationError, delete_image, save_image
 
 bp = Blueprint("records", __name__, url_prefix="/api/v1/records")
 logger = logging.getLogger(__name__)
@@ -28,9 +30,6 @@ MAX_PARTNER = 100
 
 # 导出上限：内网小团队够用；真触顶时行数会说话，不至于把内存吃穿
 EXPORT_MAX_ROWS = 20000
-
-# LIKE 通配符转义符。搜 "50%" 必须匹配字面 %，否则会命中全表。
-_LIKE_ESCAPE = "\\"
 
 
 def _notify_failure(record) -> None:
@@ -83,16 +82,6 @@ _EXPORT_HEADERS = [
 ]
 
 
-def _like_contains(keyword: str) -> str:
-    """把关键词变成安全的 LIKE 模式（前后模糊）"""
-    escaped = (
-        keyword.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
-        .replace("%", _LIKE_ESCAPE + "%")
-        .replace("_", _LIKE_ESCAPE + "_")
-    )
-    return f"%{escaped}%"
-
-
 def _parse_date(value: str | None, default: date) -> date:
     if not value:
         return default
@@ -106,9 +95,10 @@ def _clean(value: str | None, limit: int) -> str:
     return (value or "").strip()[:limit]
 
 
-def _build_filtered_query():
+def _build_filtered_query(force_employee: str | None = None):
     """按请求参数构造记录查询（列表与导出共用同一套筛选语义）。
 
+    force_employee：给客户端"只看自己"用（当前由客户端自己传 employee 参数）。
     返回 (query, params)：params 回显当前生效的筛选值，供导出拼文件名用。
     """
     today = date.today()
@@ -122,7 +112,8 @@ def _build_filtered_query():
 
     params = {"start": start, "end": end}
 
-    if employee := (request.args.get("employee") or "").strip():
+    employee = force_employee or (request.args.get("employee") or "").strip()
+    if employee:
         query = query.filter(Record.employee_name == employee)
         params["employee"] = employee
     if partner := (request.args.get("partner") or "").strip():
@@ -135,14 +126,14 @@ def _build_filtered_query():
         query = query.filter(Record.status == status)
         params["status"] = status
     if keyword := (request.args.get("q") or "").strip():
-        like = _like_contains(keyword)
+        like = like_contains(keyword)
         query = query.filter(
             db.or_(
-                Record.author.like(like, escape=_LIKE_ESCAPE),
-                Record.title.like(like, escape=_LIKE_ESCAPE),
-                Record.partner_name.like(like, escape=_LIKE_ESCAPE),
-                Record.template_name.like(like, escape=_LIKE_ESCAPE),
-                Record.employee_name.like(like, escape=_LIKE_ESCAPE),
+                Record.author.like(like, escape=LIKE_ESCAPE),
+                Record.title.like(like, escape=LIKE_ESCAPE),
+                Record.partner_name.like(like, escape=LIKE_ESCAPE),
+                Record.template_name.like(like, escape=LIKE_ESCAPE),
+                Record.employee_name.like(like, escape=LIKE_ESCAPE),
             )
         )
         params["q"] = keyword
@@ -182,13 +173,16 @@ def create_record():
 
     # 去重：同一天 + 同一员工 + 同一模板 + 同作者 + 同标题。
     # 两个人做同一篇稿子、或同一个人用两个模板出同一篇稿，都不该互相挡；
-    # "同一个人用同一个模板重复做同一件事"才是真正的误操作信号。
+    # "同一个人用同一个模板重复做成了同一件事"才是真正的误操作信号。
+    # 只跟**成功**记录比：失败记录也要留档，但拿它挡重试会让员工修好 PS 后
+    # 再也录不进这一篇（只能改标题造假），这是必修的洞。
     existing = Record.query.filter_by(
         work_date=work_date,
         employee_name=employee_name,
         template_name=template_name,
         author=author,
         title=title,
+        status=STATUS_SUCCESS,
         is_deleted=False,
     ).first()
     if existing:
@@ -207,37 +201,81 @@ def create_record():
     image_path = thumb_path = image_filename = ""
     upload = request.files.get("image")
     if upload and upload.filename:
-        image_path, thumb_path, image_filename = save_image(upload, work_date)
+        try:
+            image_path, thumb_path, image_filename = save_image(upload, work_date)
+        except ImageValidationError as e:
+            # 400 而不是 500：这是客户端送错了东西，重试也不会成功。
+            # 带上 duplicate=False 是为了让客户端不要把它当成"可重试的网络错误"
+            # 塞进离线队列——那会变成永远补不成功的一条毒记录。
+            return jsonify({"ok": False, "error": str(e), "retryable": False}), 400
 
     warnings_raw = form.get("warnings", "")
     try:
-        warnings_json = json.dumps(json.loads(warnings_raw), ensure_ascii=False) if warnings_raw else None
+        parsed_warnings = json.loads(warnings_raw) if warnings_raw else []
     except (TypeError, ValueError):
-        warnings_json = None
+        parsed_warnings = []
+    if not isinstance(parsed_warnings, list):
+        parsed_warnings = []
 
     try:
         processing_ms = int(form.get("processing_ms") or 0)
     except ValueError:
         processing_ms = 0
 
-    record = Record(
-        work_date=work_date,
-        employee_name=employee_name,
-        template_id=template_id,
-        template_name=template_name,
-        partner_name=_clean(form.get("partner_name"), MAX_PARTNER),
-        author=author,
-        title=title,
-        image_path=image_path or None,
-        thumb_path=thumb_path or None,
-        image_filename=image_filename or None,
-        client_machine=_clean(form.get("client_machine"), 100) or None,
-        ps_version=_clean(form.get("ps_version"), 64) or None,
-        status=status,
-        error_message=_clean(form.get("error_message"), 500) or None,
-        warnings=warnings_json,
-        processing_ms=processing_ms,
+    # 同一次工作重试：直接回填那条失败记录，而不是新增一条。
+    #
+    # 为什么必须回填：失败也入库是为了排障（"今天怎么这么慢"），但如果不回填，
+    # 同一篇稿会同时存在多条 failed + 一条 success——"今日出图"多算、成功率被
+    # 已经解决的历史失败永久拉低，主管看到的是假数字；连续失败三次的稿子在列表里
+    # 还会占三行。回填把上一次的失败原因并进 warnings，排障信息不丢。
+    record = (
+        Record.query.filter_by(
+            work_date=work_date,
+            employee_name=employee_name,
+            template_name=template_name,
+            author=author,
+            title=title,
+            status=STATUS_FAILED,
+            is_deleted=False,
+        )
+        .order_by(Record.created_at.desc())
+        .first()
     )
+    if record is not None:
+        prior_error = (record.error_message or "").strip()
+        if prior_error and status == STATUS_SUCCESS:
+            parsed_warnings.append(f"上次失败：{prior_error[:200]}，本次已成功")
+        old_image, old_thumb = record.image_path, record.thumb_path
+        if old_image and old_image != image_path:
+            delete_image(old_image, old_thumb)
+        backfilled = True
+    else:
+        record = Record()
+        backfilled = False
+
+    record.work_date = work_date
+    record.employee_name = employee_name
+    record.template_id = template_id
+    record.template_name = template_name
+    record.partner_name = _clean(form.get("partner_name"), MAX_PARTNER)
+    record.author = author
+    record.title = title
+    record.image_path = image_path or None
+    record.thumb_path = thumb_path or None
+    record.image_filename = image_filename or None
+    record.client_machine = _clean(form.get("client_machine"), 100) or None
+    record.ps_version = _clean(form.get("ps_version"), 64) or None
+    record.status = status
+    record.error_message = _clean(form.get("error_message"), 500) or None
+    record.warnings = json.dumps(parsed_warnings, ensure_ascii=False) if parsed_warnings else None
+    record.processing_ms = processing_ms
+    record.is_deleted = False
+    record.deleted_at = None
+    if backfilled:
+        # 回填的行沿用原 id，但把 created_at 刷成这次的完成时间：
+        # 员工 14:30 才做成功，记录却显示 14:10（上次失败的时间），会被当成"又失败了"
+        record.created_at = utcnow()
+
     db.session.add(record)
     try:
         db.session.commit()
@@ -250,6 +288,8 @@ def create_record():
     if status == STATUS_FAILED:
         _notify_failure(record)
 
+    # 概览有 15 秒缓存：不清缓存，主管盯着页面要等一个轮询周期才看到新记录
+    invalidate_overview()
     return jsonify({"ok": True, "data": record.to_dict(with_warnings=True)}), 201
 
 
@@ -305,11 +345,15 @@ def export_records():
     """按当前筛选条件导出 CSV（UTF-8 BOM，Excel 直接双击打开不乱码）"""
     query, params = _build_filtered_query()
 
+    # 先数总数再截断：静默砍掉第 20001 行是最坏的一种"看起来对"——
+    # 主管拿着少了一半的表去对账，没有任何信号提醒他。截断要明说。
+    total = query.count()
     rows = (
         query.order_by(Record.work_date.desc(), Record.created_at.desc(), Record.id.desc())
         .limit(EXPORT_MAX_ROWS)
         .all()
     )
+    truncated = total > len(rows)
 
     buf = io.StringIO()
     # utf-8-sig 即带 BOM 的 UTF-8：Excel 靠 BOM 识别中文编码，不加必乱码
@@ -331,14 +375,17 @@ def export_records():
 
     filename = f"records_{params['start']:%Y%m%d}_{params['end']:%Y%m%d}.csv"
     logger.info(
-        "导出 CSV rows=%s by=%s filters=%s",
+        "导出 CSV rows=%s total=%s truncated=%s by=%s filters=%s",
         len(rows),
+        total,
+        truncated,
         current_user().username if current_user() else "api_key",
         {k: v for k, v in params.items() if k not in ("start", "end")} or "无",
     )
     log_action(
         "export_csv",
         detail=f"{len(rows)} 行 · {params['start']}~{params['end']}"
+        + (f" · 共 {total} 行被截断" if truncated else "")
         + (
             " · "
             + " ".join(f"{k}={v}" for k, v in params.items() if k not in ("start", "end"))
@@ -346,10 +393,18 @@ def export_records():
             else ""
         ),
     )
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if truncated:
+        # 前端读到这个头就弹提示，别让人拿半张表去对账
+        headers["X-Export-Truncated"] = "1"
+        headers["X-Export-Total"] = str(total)
+        headers["X-Export-Limit"] = str(EXPORT_MAX_ROWS)
     return Response(
         buf.getvalue(),
-        mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        # charset 只写一处：mimetype 再带 charset 会拼成重复的
+        # "text/csv; charset=utf-8; charset=utf-8"
+        mimetype="text/csv",
+        headers={**headers, "Content-Type": "text/csv; charset=utf-8"},
     )
 
 
@@ -370,7 +425,6 @@ def get_record_image(record_id: int):
     record = Record.query.filter_by(id=record_id).first()
     if not record:
         return jsonify({"ok": False, "error": "记录不存在"}), 404
-
     want_thumb = request.args.get("thumb") == "1"
     stored = record.thumb_path if want_thumb and record.thumb_path else record.image_path
     if not stored:
@@ -411,6 +465,7 @@ def delete_record(record_id: int):
         f"record:{record_id}",
         f"{record.employee_name} {record.author}/{record.title}（{record.work_date}）",
     )
+    invalidate_overview()
     return jsonify({"ok": True})
 
 
@@ -424,15 +479,18 @@ def restore_record(record_id: int):
         return jsonify({"ok": False, "error": "记录不存在或未被删除"}), 404
 
     # 恢复可能撞上部分唯一索引：同一天 + 同一员工 + 同一模板 + 同作者 + 同标题
-    # 只允许一条未删除记录
-    conflict = Record.query.filter_by(
-        work_date=record.work_date,
-        employee_name=record.employee_name,
-        template_name=record.template_name,
-        author=record.author,
-        title=record.title,
-        is_deleted=False,
-    ).first()
+    # 只允许一条未删除的**成功**记录（失败记录不参与判重，见 models 里的说明）
+    conflict = None
+    if record.status == STATUS_SUCCESS:
+        conflict = Record.query.filter_by(
+            work_date=record.work_date,
+            employee_name=record.employee_name,
+            template_name=record.template_name,
+            author=record.author,
+            title=record.title,
+            status=STATUS_SUCCESS,
+            is_deleted=False,
+        ).first()
     if conflict:
         return (
             jsonify(
@@ -459,6 +517,7 @@ def restore_record(record_id: int):
         f"record:{record_id}",
         f"{record.employee_name} {record.author}/{record.title}（{record.work_date}）",
     )
+    invalidate_overview()
     return jsonify({"ok": True, "data": record.to_dict()})
 
 

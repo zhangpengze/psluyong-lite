@@ -85,6 +85,17 @@ class Config:
     BACKUP_HOUR = int(os.getenv("BACKUP_HOUR", "3"))
     BACKUP_MINUTE = int(os.getenv("BACKUP_MINUTE", "30"))
 
+    # 成品图镜像目录：留空 = 不镜像。指向另一块盘 / 另一台 NAS 的共享目录。
+    # 数据库有备份而图片没有，等于只保住了索引——这才是最容易丢的东西。
+    IMAGES_MIRROR_DIR = os.getenv("IMAGES_MIRROR_DIR", "").strip()
+
+    # 图片占用告警阈值（GB）：超过就推一次群，一天最多一次，避免刷屏
+    DISK_ALERT_GB = float(os.getenv("DISK_ALERT_GB", "20"))
+
+    # 外部告警开关：备份失败 / 图片镜像失败 / 磁盘超阈值 / 定时日报推送失败时推群。
+    # 复用失败的推送通道（NAPCAT_WEBHOOK），没配就只记日志。
+    ALERT_ON_OPS_FAILURE = os.getenv("ALERT_ON_OPS_FAILURE", "1") == "1"
+
 
 def ensure_dirs() -> None:
     for path in (DATA_DIR, IMAGES_DIR, BACKUP_DIR):

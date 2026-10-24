@@ -497,18 +497,26 @@ tr.detail-row td { background: var(--card-sub); padding: 0; }
 .modal-card p { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; line-height: 1.65; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
-/* ===== 系统状态条 ===== */
-.statusbar {
-  display: flex; flex-wrap: wrap; gap: 6px 22px;
-  padding: 12px 18px; font-size: 12.5px; color: var(--muted);
-  align-items: center;
+/* ===== 系统状态卡（组件行式：状态点 + 组件·状态 + 右侧真实指标）===== */
+.sys-rows { display: flex; flex-direction: column; gap: 8px; }
+.sys-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  background: var(--card-sub); border-radius: var(--radius-sm);
+  padding: 10px 14px; font-size: 13px;
 }
-.statusbar .item { display: inline-flex; align-items: center; gap: 6px; }
-.statusbar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); flex: 0 0 7px; }
-.statusbar .dot.ok { background: var(--green); }
-.statusbar .dot.warn { background: var(--orange); }
-.statusbar .dot.bad { background: var(--red); }
-.statusbar .sep { color: var(--line-strong); }
+.sys-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+.sys-dot.ok { background: var(--green); }
+.sys-dot.warn { background: var(--orange); }
+.sys-dot.bad { background: var(--red); }
+.sys-dot.off { background: var(--line-strong); }
+.sys-name { color: var(--text); font-weight: 500; }
+.sys-status { font-size: 12.5px; }
+.sys-status.ok { color: var(--green); }
+.sys-status.warn { color: var(--orange); }
+.sys-status.bad { color: var(--red); }
+.sys-status.off { color: var(--muted); }
+.sys-metric { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.card-link { font-size: 12.5px; font-weight: 400; }
 
 /* ===== 登录 ===== */
 .login-wrap {
@@ -552,6 +560,71 @@ pre.report {
 /* ===== 操作日志 ===== */
 .audit-actor { font-weight: 600; }
 
+/* ===== 数据概览（合作伙伴视角）===== */
+.updated { color: var(--muted); }
+.updated.just { color: var(--primary); }
+
+.range-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.range-bar .chip { cursor: pointer; font: inherit; }
+.range-bar .chip.active { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+.range-custom { display: inline-flex; gap: 6px; align-items: center; }
+.range-custom input[type="date"] { width: 142px; }
+.range-sep { color: var(--muted); font-size: 12.5px; }
+.range-error { color: var(--red); font-size: 12.5px; margin: -6px 0 12px; }
+
+.card-meta { font-size: 12px; font-weight: 400; color: var(--muted); }
+
+.kpi .unit { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+.kpi .hint .delta { display: inline-flex; align-items: center; gap: 3px; font-weight: 600; }
+.kpi .hint .delta.good { color: var(--green); }
+.kpi .hint .delta.bad { color: var(--red); }
+.kpi .hint .delta.flat { color: var(--muted); }
+
+.trend-svg { width: 100%; height: auto; display: block; }
+.trend-grid { stroke: var(--line); stroke-width: 0.5; }
+.trend-ylbl, .trend-lbl, .trend-val { font-size: 11px; fill: var(--muted); }
+.trend-val { font-variant-numeric: tabular-nums; }
+.trend-empty { padding: 44px 0; text-align: center; color: var(--muted); font-size: 13px; }
+
+td.r, th.r { text-align: right; }
+.share-cell { min-width: 116px; }
+.share-cell .share-flex { display: flex; align-items: center; gap: 8px; }
+.share-cell .bar-track { height: 7px; flex: 1; min-width: 44px; }
+.share-cell .share-num { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+tr.partner-row { cursor: pointer; }
+tr.partner-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+tr.partner-row.open td { background: var(--primary-soft); }
+.ptag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+.ptag .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+.ptag.active { color: var(--green); }
+.ptag.active .dot { background: var(--green); }
+.ptag.warning { color: var(--orange); }
+.ptag.warning .dot { background: var(--orange); }
+.ptag.dormant { color: var(--muted); }
+.ptag.dormant .dot { background: var(--line-strong); }
+
+.tpl-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; margin-bottom: 10px; font-size: 13px; }
+.tpl-head .tpl-sum { color: var(--muted); }
+.tpl-table th { background: transparent; box-shadow: none; }
+.tpl-table td { padding: 7px 10px; }
+
+.table-note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
+.table-more { margin-top: 12px; text-align: center; }
+
+/* TOP5 横条可点击：定位到明细表对应行 */
+.top-row { cursor: pointer; border-radius: 6px; }
+.top-row:hover { background: var(--primary-soft); }
+.top-row:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+tr.partner-row.flash-row td { animation: row-flash 1.8s ease-out; }
+@keyframes row-flash { from { background: var(--primary-soft); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  tr.partner-row.flash-row td { animation: none; }
+}
+
+/* 侧栏：上次登录时间（admin_users.last_login_at，一眼看出账号被谁用过） */
+.who-login { font-size: 12px; color: var(--sidebar-muted); padding: 1px 12px 6px; }
+
 /* ===== 移动端 ===== */
 @media (max-width: 900px) {
   .reports-layout { grid-template-columns: 1fr; }
@@ -568,6 +641,7 @@ pre.report {
   .brand small { display: none; }
   .sidebar .spacer { display: none; }
   .sidebar .who { display: none; }
+  .sidebar .who-login { display: none; }
   .theme-btn { margin: 0 0 0 auto; padding: 8px 10px; border: 0; }
   .theme-btn .theme-label { display: none; }
   .sidebar a { padding: 8px 10px; white-space: nowrap; }
@@ -587,14 +661,22 @@ pre.report {
   .filter-bar select, .filter-bar input { width: 100%; }
   select { min-width: 0; }
   .pager { justify-content: center; flex-wrap: wrap; }
+
+  /* 概览页：自定义日期区窄屏换行，两个日期框各自撑满 */
+  .range-custom { flex-wrap: wrap; width: 100%; }
+  .range-custom input[type="date"] { flex: 1; width: auto; min-width: 120px; }
+  .share-cell { min-width: 84px; }
+
+  /* 系统状态卡：窄屏指标换到第二行，别和组件名挤在一列 */
+  .sys-metric { margin-left: 26px; }
 }
 
 /* ===== 打印：主管要把记录页打出来存档 ===== */
 @media print {
   :root { color-scheme: light; }
   body { background: #fff; }
-  .sidebar, .filter-bar, .quick-ranges, .pager, .toast-host,
-  .theme-btn, .lightbox, .modal, .page-head .actions, td:last-child, .gone-box { display: none !important; }
+  .sidebar, .filter-bar, .quick-ranges, .range-bar, .range-error, .pager, .toast-host,
+  .theme-btn, .lightbox, .modal, .page-head .actions, .updated, td:last-child, .gone-box { display: none !important; }
   .shell { display: block; }
   .main { padding: 0; }
   .card { box-shadow: none; border-color: #ccc; break-inside: auto; }

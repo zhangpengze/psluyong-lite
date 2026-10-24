@@ -1,16 +1,22 @@
-# 服务端 + 机器人
-Flask>=3.0.0
-Flask-SQLAlchemy>=3.1.1
-SQLAlchemy>=2.0.25
-Pillow>=10.2.0
-python-dotenv>=1.0.1
-tzdata>=2024.1  # Windows 上 zoneinfo 需要它，否则时区退化成 UTC
-waitress>=3.0.0
-APScheduler>=3.10.4
-requests>=2.31.0
+# 服务端 + 机器人依赖
+#
+# 为什么全部锁死版本：NAS 上每次 `docker compose up -d --build` 都会重装依赖。
+# 用 >= 时"构建当天的最新版"就是线上版本——SQLAlchemy / Flask 跨一个大版本
+# 就可能白屏，而你手里没有"上次能跑的那套"。锁死之后重建是幂等的。
+# 升级流程：改这里 → 本地跑一遍 pytest → 重新构建镜像 → 后台抽查。
+# 下面这些版本是 2026-10-23 实测跑通全套 185+ 用例的组合。
+Flask==3.1.3
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.1.5
+Pillow==13.0.0
+python-dotenv==1.2.4
+tzdata==2026.5  # Windows 上 zoneinfo 需要它，否则时区退化成 UTC
+waitress==3.0.2
+APScheduler==3.11.3
+requests==2.34.2
 
 # 员工客户端与 Windows 开发机需要（COM 调 PS）；Linux 后端容器靠 marker 自动跳过
-pywin32>=306; sys_platform == "win32"
+pywin32==312; sys_platform == "win32"
 
 # 测试
-pytest>=8.0.0
+pytest==9.1.1

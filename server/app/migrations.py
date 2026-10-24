@@ -30,13 +30,15 @@ logger = logging.getLogger(__name__)
 # 保留旧索引——旧规则继续拦数据，表现为"代码明明改了，线上还是 409"。
 # 只删我们自己命名的索引，SQLite 自动索引（sqlite_autoindex_*）不碰。
 _DEPRECATED_INDEXES: dict[str, tuple[str, ...]] = {
-    # 去重键两次调整：(work_date, author, title)
+    # 去重键三次调整：(work_date, author, title)
     #   → (work_date, employee_name, author, title)
     #   → (work_date, employee_name, template_name, author, title)
-    # 老库这两个历史索引都要删，否则旧规则继续拦数据。
+    #   → 同上但只约束 status='success'（失败记录不再挡住重试）
+    # 老库这些历史索引都要删，否则旧规则继续拦数据。
     "records": (
         "uq_records_date_author_title_active",
         "uq_records_date_employee_author_title_active",
+        "uq_records_dedup_active",
     ),
 }
 

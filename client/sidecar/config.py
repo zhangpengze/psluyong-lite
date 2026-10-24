@@ -105,6 +105,140 @@ def template_dir_of(cfg: "ClientConfig") -> Path:
     return Path(cfg.template_dir) if cfg.template_dir else DEFAULT_TEMPLATE_DIR
 
 
+# ========== 写入校验 ==========
+# 设置页的滑块和下拉框自带范围，但 HTTP 接口没有。直接 POST 一个
+# jpg_quality=999 就能把 PS 导出参数搞坏，而且这个值会被写进 config.json，
+# 下次启动继续生效，从界面上完全看不出来哪里错了。所以落盘前统一收口。
+
+_INT_RANGES: dict[str, tuple[int, int]] = {
+    "jpg_quality": (1, 12),
+}
+# 六个数都是窗口坐标：可以是任意整数，-1 表示"未记录"
+_INT_ANY: set[str] = {
+    "win_x",
+    "win_y",
+    "history_win_x",
+    "history_win_y",
+    "settings_win_x",
+    "settings_win_y",
+}
+_STR_LIMITS: dict[str, int] = {
+    "server_url": 300,
+    "api_key": 256,
+    "employee_name": 100,
+    "ps_path": 512,
+    "output_dir": 512,
+    "template_dir": 512,
+    "author_placeholder": 64,
+    "title_placeholder": 64,
+    "last_template_id": 255,
+    "last_partner": 100,
+    "last_author": 200,
+}
+_ENUMS: dict[str, set[str]] = {
+    "theme": {"dark", "light"},
+    "filename_rule": {"author", "author_title"},
+    "dock_side": {"", "left", "right", "top"},
+}
+_BOOLS: set[str] = {"auto_clear", "always_on_top", "auto_dock", "close_to_tray"}
+
+
+def _as_int(value: object) -> int | None:
+    """宽松取整：JSON 里 8.0 和 "8" 都当 8，其余一律 None。
+
+    bool 必须先挡在前面——Python 里 True 是 int 的子类，不挡的话
+    `jpg_quality=true` 会被静默当成 1。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            try:
+                return int(text)
+            except ValueError:
+                return None
+    return None
+
+
+def sanitize_config_patch(payload: object) -> tuple[dict, list[str]]:
+    """把客户端提交的配置补丁规整成可安全落盘的形式。
+
+    返回 (clean, errors)。**errors 非空时调用方应整包拒绝**：部分落盘会让
+    配置处在"一半新值一半旧值"的状态，比直接报错难排查得多。
+
+    未知字段一律报错而不是静默忽略——拼错一个 key 却"保存成功"，
+    员工会以为自己改了设置。
+    """
+    if not isinstance(payload, dict):
+        return {}, ["配置必须是 JSON 对象"]
+
+    known = set(ClientConfig.__dataclass_fields__)
+    clean: dict = {}
+    errors: list[str] = []
+
+    for key, value in payload.items():
+        if key not in known:
+            errors.append(f"未知配置项 {key}")
+            continue
+        if value is None:
+            continue  # 前端偶尔传 null，语义是"这一项不改"
+
+        if key in _BOOLS:
+            if not isinstance(value, bool):
+                errors.append(f"{key} 必须是布尔值")
+            else:
+                clean[key] = value
+
+        elif key in _INT_RANGES:
+            low, high = _INT_RANGES[key]
+            num = _as_int(value)
+            if num is None:
+                errors.append(f"{key} 必须是整数")
+            elif not low <= num <= high:
+                errors.append(f"{key} 必须在 {low}~{high} 之间")
+            else:
+                clean[key] = num
+
+        elif key in _INT_ANY:
+            num = _as_int(value)
+            if num is None:
+                errors.append(f"{key} 必须是整数")
+            else:
+                clean[key] = num
+
+        elif key == "partners":
+            if not isinstance(value, list):
+                errors.append("partners 必须是字符串数组")
+            else:
+                clean[key] = clean_partners(value)
+
+        elif key in _ENUMS:
+            allowed = _ENUMS[key]
+            if not isinstance(value, str) or value not in allowed:
+                names = "、".join(sorted(v for v in allowed if v)) or "空"
+                errors.append(f"{key} 只能是 {names}")
+            else:
+                clean[key] = value
+
+        elif key in _STR_LIMITS:
+            if not isinstance(value, str):
+                errors.append(f"{key} 必须是字符串")
+            else:
+                clean[key] = value.strip()[: _STR_LIMITS[key]]
+
+        else:
+            # 新增了 dataclass 字段却忘了在这里登记：宁可报错，
+            # 也不要让它悄悄写进 config.json
+            errors.append(f"{key} 暂不支持修改")
+
+    return clean, errors
+
+
 def _normalize_path(value: str) -> str:
     """折叠重复分隔符。
 

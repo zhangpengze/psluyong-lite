@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 from sqlalchemy import func
 
+from ..audit import log_action
 from ..auth import api_or_session
 from ..db import db
 from ..models import STATUS_FAILED, STATUS_SUCCESS, Record
+from ..overview import RangeError, get_overview, parse_limit, parse_range
+from ..panels import overview_csv, overview_html
 
 bp = Blueprint("stats", __name__, url_prefix="/api/v1/stats")
 
@@ -114,4 +117,51 @@ def trend():
             "by_template": _group_count(start, end, Record.template_name),
             "by_partner": _group_count(start, end, Record.partner_name),
         }
+    )
+
+
+@bp.get("/overview")
+@api_or_session
+def overview():
+    """仪表盘概览：KPI + 趋势 + 合作伙伴明细（含各模板用量），一次拿齐。
+
+    range=today|yesterday|7d|30d|custom（custom 另带 start/end，YYYY-MM-DD）。
+    响应同时带结构化字段和渲染好的 html 片段——首屏 Jinja 与轮询 JS
+    复用同一份标记（panels.py 生成），避免两套渲染漂移。
+    """
+    try:
+        start, end, label, preset = parse_range(request.args)
+    except RangeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    payload = dict(get_overview(start, end, label, preset))
+    payload["html"] = overview_html(payload, parse_limit(request.args))
+    return jsonify(payload)
+
+
+@bp.get("/overview/export")
+@api_or_session
+def overview_export():
+    """概览导出 CSV：汇总 + 伙伴明细 + 各伙伴模板用量（UTF-8 BOM，Excel 直开）。
+
+    不受 limit 截断影响——导出就是要全量。记审计：导出不写库，但
+    "谁把数据拷走了"必须查得到（与记录页导出同一处理）。
+    """
+    try:
+        start, end, label, preset = parse_range(request.args)
+    except RangeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    ov = get_overview(start, end, label, preset)
+    log_action("export_csv", detail=f"概览 {start}~{end} · {len(ov['partners'])} 家伙伴")
+    filename = f"overview_{start:%Y%m%d}_{end:%Y%m%d}.csv"
+    return Response(
+        overview_csv(ov),
+        # charset 只写一处：mimetype 再带 charset 会让 Flask 重复拼接成
+        # "text/csv; charset=utf-8; charset=utf-8"
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": "text/csv; charset=utf-8",
+        },
     )

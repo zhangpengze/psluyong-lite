@@ -320,3 +320,67 @@ def test_localtime_filter_converts_utc_to_config_tz(app):
         fmt = app.jinja_env.filters["localtime"]
         assert fmt(datetime(2026, 10, 20, 11, 23)) == "10-20 19:23"  # UTC 11:23 -> +08
         assert fmt(None) == "-"
+
+
+def test_failed_then_retry_backfills_same_record(client, clean_db, sample_image):
+    """失败后重试同一篇必须放行，并回填同一条记录。
+
+    真实场景：PS 没开 → 提交一条 failed → 员工修好 PS 再点一次生成。
+    旧逻辑下这次重试会被自己刚才那条失败记录判成 409「请勿重复提交」，
+    员工只能改标题造假，或等管理员去删记录。
+    """
+    failed = _submit(client, sample_image, status="failed", error_message="PS 未运行")
+    assert failed.status_code == 201
+    failed_id = failed.get_json()["data"]["id"]
+
+    retry = _submit(client, sample_image)
+    assert retry.status_code == 201, retry.get_data(as_text=True)
+    data = retry.get_json()["data"]
+    assert data["status"] == "success"
+    assert data["id"] == failed_id, "应回填原失败记录，而不是新增一条"
+
+    # 上一次的失败原因不能丢，要并进 warnings 供排障
+    assert any("上次失败" in w and "PS 未运行" in w for w in data["warnings"])
+
+    # 统计不能被历史失败拉低：1 条记录、0 失败
+    listing = client.get("/api/v1/records", headers=AUTH).get_json()
+    assert listing["total"] == 1
+    assert listing["items"][0]["status"] == "success"
+
+
+def test_repeated_failure_keeps_one_row(client, clean_db, sample_image):
+    """连续失败三次也只留一条记录，最新原因覆盖旧的"""
+    for i in range(3):
+        resp = _submit(client, sample_image, status="failed", error_message=f"第{i + 1}次失败")
+        assert resp.status_code == 201
+
+    listing = client.get("/api/v1/records", headers=AUTH).get_json()
+    assert listing["total"] == 1
+    assert listing["items"][0]["error_message"] == "第3次失败"
+
+
+def test_success_then_duplicate_still_rejected(client, clean_db, sample_image):
+    """成功记录之间仍然要判重——修复失败重试不能把真正的重复录入也放过去"""
+    assert _submit(client, sample_image).status_code == 201
+    dup = _submit(client, sample_image, status="failed", error_message="重试")
+    assert dup.status_code == 409 and dup.get_json()["duplicate"] is True
+
+
+def test_export_reports_truncation(client, clean_db, sample_image, monkeypatch):
+    """导出被行数上限截断时要明说，不能让人拿半张表去对账"""
+    monkeypatch.setattr("server.app.routes.records.EXPORT_MAX_ROWS", 1)
+    _submit(client, sample_image)
+    _submit(client, sample_image, author="王五", title="另一篇稿件")
+
+    resp = client.get("/api/v1/records/export", headers=AUTH)
+    assert resp.status_code == 200
+    assert resp.headers["X-Export-Truncated"] == "1"
+    assert resp.headers["X-Export-Total"] == "2"
+    assert resp.headers["X-Export-Limit"] == "1"
+
+
+def test_export_without_truncation_has_no_header(client, clean_db, sample_image):
+    _submit(client, sample_image)
+    resp = client.get("/api/v1/records/export", headers=AUTH)
+    assert resp.status_code == 200
+    assert "X-Export-Truncated" not in resp.headers

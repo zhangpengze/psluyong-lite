@@ -29,8 +29,16 @@ from core.runner import DEFAULT_FILENAME_RULE, FILENAME_RULES  # noqa: E402
 
 from . import __version__, queue  # noqa: E402
 from .api_client import ApiClient, ServerError  # noqa: E402
-from .config import ClientConfig, ensure_dirs, load_config, save_config, template_dir_of  # noqa: E402
+from .config import (
+    ClientConfig,
+    ensure_dirs,
+    load_config,
+    sanitize_config_patch,
+    save_config,
+    template_dir_of,
+)  # noqa: E402
 from .executor import BusyError, Executor  # noqa: E402
+from .ps_detect import PSInstall, detect_photoshop  # noqa: E402
 from .worker import read_json, write_json_atomic  # noqa: E402
 
 logging.basicConfig(
@@ -157,6 +165,16 @@ def _ps_version(ps_path: str) -> str:
         return ""
 
 
+def _resolve_ps(cfg) -> PSInstall:
+    """当前机器上的 Photoshop：手填优先，否则自动识别（任意版本/任意盘符）。
+
+    识别结果只用于两件事——给记录写 ps_version、以及在设置页展示。
+    COM 连接本身用版本无关的 ProgID，装哪版都能连，所以识别不到
+    也不该拦住生成（员工可以手动指定路径）。
+    """
+    return detect_photoshop(getattr(cfg, "ps_path", "") or "")
+
+
 def _submit_fields(cfg: ClientConfig, fields: dict, image_path_str: str, success: bool) -> dict:
     """把一条记录上报服务器；网络问题进离线队列，不让员工白干。
 
@@ -184,6 +202,13 @@ def _submit_fields(cfg: ClientConfig, fields: dict, image_path_str: str, success
             # 直接透传服务端文案。判重规则会变（比如键里加上模板名），
             # 客户端硬编码一份迟早和服务端对不上，员工看到的原因就是错的。
             upload_message = f"服务器提示：{e.message}"
+        elif e.status and e.status < 500:
+            # 4xx 是"服务端明确不要这一条"，重试永远不会成功：
+            #   401/403 → API Key 错了；400 → 参数或图片不合法；
+            #   404 → 客户端和服务端版本对不上
+            # 塞进离线队列只会变成永远补不成功的毒记录，每次启动重试一遍，
+            # 最后沉淀成死信，员工看到"有 N 条记录补传失败"却不知道原因在配置里。
+            upload_message = f"服务器拒绝了这条记录（{e.status}）：{e.message}"
         else:
             queue.enqueue(fields, str(image_path) if image_path else None)
             queued = True
@@ -266,6 +291,9 @@ def create_sidecar() -> Flask:
                 "server_reachable": client.health(),
                 "com_available": COM_AVAILABLE,
                 "platform": platform.platform(),
+                # 本机 Photoshop 的自动识别结果：路径/版本/怎么找到的。
+                # 员工不必再手填路径——装哪版、装在哪个盘都能认出来
+                "ps": _resolve_ps(cfg).to_dict(),
                 "config": cfg.to_dict(),
                 "pending": len(queue.pending()),
                 "dead": len(queue.dead_letters()),
@@ -277,6 +305,21 @@ def create_sidecar() -> Flask:
             }
         )
 
+    # ========== Photoshop 自动识别 ==========
+    @app.get("/ps")
+    def get_ps():
+        """当前机器上的 Photoshop（手填优先，否则自动识别）。"""
+        return jsonify({"ok": True, "ps": _resolve_ps(load_config()).to_dict()})
+
+    @app.post("/ps/detect")
+    def detect_ps():
+        """重新识别：装完 PS / 换版本后点一下"重新识别"就走这里。
+
+        故意不做成写配置：识别是运行时的事，把结果落到 ps_path 会让
+        "自动识别"悄悄变成"写死路径"，员工下次换版本反而对不上。
+        """
+        return jsonify({"ok": True, "ps": _resolve_ps(load_config()).to_dict()})
+
     # ========== 配置 ==========
     @app.get("/config")
     def get_config():
@@ -286,9 +329,23 @@ def create_sidecar() -> Flask:
     def set_config():
         payload = request.get_json(silent=True) or {}
         cfg = load_config()
-        for key, value in payload.items():
-            if hasattr(cfg, key) and value is not None:
-                setattr(cfg, key, value)
+        clean, errors = sanitize_config_patch(payload)
+        if errors:
+            # 整包拒绝：只写一半会让配置文件处在"部分生效"的状态，
+            # 员工看到的界面和实际行为对不上，比直接报错难查得多
+            logger.warning("配置保存被拒绝: %s", "；".join(errors))
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "；".join(errors),
+                        "config": cfg.to_dict(),
+                    }
+                ),
+                400,
+            )
+        for key, value in clean.items():
+            setattr(cfg, key, value)
         save_config(cfg)
         logger.info("配置已保存 employee=%s server=%s", cfg.employee_name, cfg.server_url)
         return jsonify({"ok": True, "config": cfg.to_dict()})
@@ -439,7 +496,9 @@ def create_sidecar() -> Flask:
             "filename_rule": cfg.filename_rule
             if cfg.filename_rule in FILENAME_RULES
             else DEFAULT_FILENAME_RULE,
-            "ps_path": cfg.ps_path,
+            # 识别出的真实路径：worker 拿它连接/记日志，员工手填为空时
+            # 以前这里传的是空串，日志里看不出到底连的是哪个 PS
+            "ps_path": _resolve_ps(cfg).path,
             # 生成当天的日期：离线记录可能隔天才补传，服务端不给就用补传当天，
             # 日报/统计会把它算到错误的一天
             "work_date": date.today().isoformat(),
@@ -476,7 +535,16 @@ def create_sidecar() -> Flask:
                 return jsonify(cached)
 
             state = status.get("state")
-            if state == "uncertain":
+            if state == "cancelled":
+                # 员工自己点的取消，不是失败：绝不能上报一条 failed 记录。
+                # 报了的话"今日失败数"里会多出一条查不出原因的记录，成功率
+                # 被无端拉低，而真正的原因是"他不想等了"。
+                payload = {
+                    "ok": False,
+                    "cancelled": True,
+                    "error": status.get("message", "已取消"),
+                }
+            elif state == "uncertain":
                 payload = {"ok": False, "error": status.get("message", "结果未知"), "uncertain": True}
             elif state == "error":
                 payload = {"ok": False, "error": status.get("message", "生成模块异常")}
@@ -489,7 +557,9 @@ def create_sidecar() -> Flask:
                     logger.warning("失败记录上报异常", exc_info=True)
             else:
                 fields = _record_fields(cfg, task_dir, status, "")
-                fields["ps_version"] = _ps_version(cfg.ps_path)
+                # 用识别出的路径取版本，而不是只认设置里手填的那个：
+                # 手填为空时以前这里永远写不出 ps_version，报障时查不到是哪一版
+                fields["ps_version"] = _resolve_ps(cfg).version
                 payload = _submit_fields(cfg, fields, status.get("image_path", ""), success=True)
                 payload["warnings"] = status.get("warnings", [])
                 payload["duration_ms"] = status.get("duration_ms", 0)
@@ -501,8 +571,54 @@ def create_sidecar() -> Flask:
 
         return jsonify({"ok": True, "state": status.get("state"), "finished": False, **status})
 
+    @app.post("/export/cancel")
+    def export_cancel():
+        """取消当前生成。
+
+        之前没有这个入口：PS 卡在对话框或大模板上挂住时，前端永远停在
+        "正在导出图片… Ns"，按钮一直禁用，员工唯一出路是关掉整个软件。
+        现在前端等久了就把主按钮变成「取消生成」。
+        """
+        payload = request.get_json(silent=True) or {}
+        task_id = str(payload.get("task_id") or "").strip()
+        if not task_id:
+            # 没带 task_id 就取消当前唯一在跑的任务：客户端是单任务模型，
+            # 前端也不必自己记 id 才能自保
+            task_id = executor.running_task() or ""
+        if not task_id:
+            return jsonify({"ok": False, "error": "当前没有正在生成的任务"}), 200
+
+        ok, message = executor.cancel(task_id)
+        return jsonify({"ok": ok, "task_id": task_id, "error": None if ok else message, "message": message}), 200
+
+    def _log_tail(lines: int = 3, max_chars: int = 300) -> str:
+        """取 worker 日志尾部，给失败记录当"现场"。
+
+        员工只会说"生不出来"，而 PS 的真实报错在 worker.log 里。把最后几行带上，
+        后台详情页就能直接看到原因，不用再让对方去找 %APPDATA% 下的日志文件。
+        """
+        from .config import app_data_dir
+
+        path = app_data_dir() / "logs" / "worker.log"
+        try:
+            # 日志按 2MB 轮转，直接读尾部的 8KB 足够覆盖最后几行
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - 8192))
+                raw = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+        picked = [line.strip() for line in raw.splitlines() if line.strip()][-lines:]
+        return " / ".join(picked)[-max_chars:]
+
     def _record_fields(cfg: ClientConfig, task_dir: Path, status: dict, error_message: str) -> dict:
         params = read_json(task_dir / "params.json") or {}
+        warnings = list(status.get("warnings") or [])
+        if not status.get("success"):
+            tail = _log_tail()
+            if tail:
+                warnings.append(f"客户端日志：{tail}")
         return {
             "work_date": params.get("work_date", ""),
             "employee_name": params.get("employee_name") or cfg.employee_name,
@@ -515,34 +631,65 @@ def create_sidecar() -> Flask:
             "ps_version": "",
             "status": "success" if status.get("success") else "failed",
             "error_message": error_message,
-            "warnings": json.dumps(status.get("warnings", []), ensure_ascii=False) if status.get("warnings") else "",
+            "warnings": json.dumps(warnings, ensure_ascii=False) if warnings else "",
             "processing_ms": status.get("duration_ms", 0),
         }
 
     # ========== 历史（客户端只看自己的）==========
     # 服务端列表接口默认区间是「今天往前 7 天」，客户端要自己声明区间，
     # 否则「累计记录」会缩水成「最近 7 天」。
-    HISTORY_RANGES = {"7": 7, "30": 30, "all": 0}
-    HISTORY_ALL_START = "2000-01-01"
+    # today/7/30/all 是快捷档；custom 是员工自己在界面上选的起止日期
+    # （"我想看 9 月那批"），起止都由前端给，这里只做合法性与方向校验。
+    HISTORY_RANGES = {"today": 1, "7": 7, "30": 30, "all": 0}
+    HISTORY_ALL_START = date(2000, 1, 1)
+
+    def _query_date(name):
+        """YYYY-MM-DD → date；空或脏值返回 None（脏值不该让整页记录挂掉）"""
+        raw = (request.args.get(name) or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
 
     @app.get("/history")
     def history():
         cfg = load_config()
         if not cfg.employee_name:
-            return jsonify({"ok": True, "items": [], "total": 0, "range": "7"})
+            return jsonify({"ok": True, "items": [], "total": 0, "range": "7", "start": "", "end": ""})
 
-        raw_range = str(request.args.get("range") or "7")
-        if raw_range not in HISTORY_RANGES:
-            raw_range = "7"
-        days = HISTORY_RANGES[raw_range]
         today = date.today()
-        start = HISTORY_ALL_START if days == 0 else (today - timedelta(days=days - 1)).isoformat()
-        # 全部区间多给一些条数，前 7 天这种小范围没必要拉满
-        size = 200 if days == 0 else 60
+        raw_range = str(request.args.get("range") or "7")
+
+        if raw_range == "custom":
+            start_d = _query_date("start")
+            end_d = _query_date("end")
+            # 只填一头就补另一头：只填起 → 到今天；只填止 → 就只看那一天。
+            # 两头都没填等于没筛，退回近 7 天（不能让空区间把列表清空）。
+            if start_d and not end_d:
+                end_d = today
+            elif end_d and not start_d:
+                start_d = end_d
+            if not start_d or not end_d:
+                raw_range = "7"
+
+        if raw_range != "custom":
+            if raw_range not in HISTORY_RANGES:
+                raw_range = "7"
+            days = HISTORY_RANGES[raw_range]
+            end_d = today
+            start_d = HISTORY_ALL_START if days == 0 else today - timedelta(days=days - 1)
+
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        # 跨度大的区间才值得拉满：近 7 天拉 200 条纯属浪费带宽，而"全部"或
+        # 自选一个月必须给足，否则界面上「共 120 条 · 只显示最近 60 条」很难看。
+        size = 200 if (end_d - start_d).days >= 30 else 60
 
         try:
             data = _client(cfg).list_records(
-                cfg.employee_name, size=size, start=start, end=today.isoformat()
+                cfg.employee_name, size=size, start=start_d.isoformat(), end=end_d.isoformat()
             )
             return jsonify(
                 {
@@ -550,12 +697,24 @@ def create_sidecar() -> Flask:
                     "items": data["items"],
                     "total": data["total"],
                     "range": raw_range,
+                    # 回显真正生效的区间：前端直接显示它，省得自己再算一遍
+                    # （"只填了起始日"到底查到哪天，界面上必须能看见）
+                    "start": start_d.isoformat(),
+                    "end": end_d.isoformat(),
                     "size": size,
                 }
             )
         except ServerError as e:
             return jsonify(
-                {"ok": False, "error": e.message, "items": [], "total": 0, "range": raw_range}
+                {
+                    "ok": False,
+                    "error": e.message,
+                    "items": [],
+                    "total": 0,
+                    "range": raw_range,
+                    "start": start_d.isoformat(),
+                    "end": end_d.isoformat(),
+                }
             ), 200
 
     @app.get("/history/<int:record_id>/image")

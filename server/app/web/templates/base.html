@@ -56,6 +56,7 @@ try {
 
     {% if me %}
       <div class="who">{{ me.username }}{% if me.is_admin %} · 管理员{% else %} · 只读{% endif %}</div>
+      <div class="who-login">上次登录 {{ me.last_login_at|localtime('%m-%d %H:%M') }}</div>
       <a href="{{ url_for('web.logout') }}">退出登录</a>
     {% endif %}
   </aside>

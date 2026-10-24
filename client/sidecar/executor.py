@@ -142,6 +142,52 @@ class Executor:
         """当前占用的任务 id（给 /status 展示"生成中"状态）"""
         return self._current_task_id
 
+    def cancel(self, task_id: str) -> tuple[bool, str]:
+        """中止一个正在跑的任务。
+
+        顺序很关键：**先写终态文件，再杀进程**。反过来的话 status() 会先看到
+        进程消失、又读不到 status.json，判成 uncertain（"结果未知，请到输出目录
+        确认"）——员工自己点的取消，却被告知"可能已经生成了一张图"，然后跑去
+        翻文件夹。取消必须是确定的。
+
+        杀进程是唯一手段：worker 此刻阻塞在 COM 调用里，既没有管道也没有
+        事件循环，任何 Python 侧的取消标志都读不到。代价是 PS 里会留下一个
+        已打开的模板文档（runner 的 finally close_document 跑不到了），
+        所以返回文案必须提醒员工手动关掉。
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            # 已经在别处结束（reaper 释放 / 上前一次轮询已读终态），
+            # 不该报错吓人，让前端按"已结束"处理即可
+            return False, "任务已经结束了"
+
+        task_dir: Path = task["dir"]
+        elapsed_ms = int((time.monotonic() - task["started"]) * 1000)
+        write_json_atomic(
+            task_dir / "status.json",
+            {
+                "state": "cancelled",
+                "success": False,
+                "image_path": "",
+                "message": (
+                    "已取消生成。Photoshop 里可能留下这个模板的未保存文档，"
+                    "请手动关掉再重试，否则文档会越叠越多。"
+                ),
+                "warnings": [],
+                "duration_ms": elapsed_ms,
+            },
+        )
+
+        popen: subprocess.Popen = task["popen"]
+        try:
+            popen.kill()
+        except OSError as e:
+            logger.warning("取消时终止 worker 失败 task=%s: %s", task_id, e)
+
+        logger.info("任务已取消 task=%s 耗时=%sms", task_id, elapsed_ms)
+        self._release(task_id)
+        return True, "已取消"
+
     # ---- 内部 ----
 
     def _ensure_reaper(self) -> None:

@@ -409,46 +409,54 @@ def test_history_range_drives_window_and_total(sc, configured, monkeypatch):
     sc.get("/history?range=abc")
     assert fake.list_calls[-1][2] == (today - timedelta(days=6)).isoformat(), "非法值回退近 7 天"
 
-
-# ========== 记录日期与历史区间 ==========
-def test_export_carries_generation_date(sc, configured, monkeypatch):
-    """生成当天的日期随记录上报：离线隔天补传不能算到补传那天"""
-    from datetime import date
-
-    fake = FakeClient()
-    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
-    _stub_worker(monkeypatch)
-
-    start = sc.post(
-        "/export", json={"template_id": "tpl-1.psd", "author": "李四", "title": "深度学习"}
-    ).get_json()
-    _poll_final(sc, start["task_id"])
-
-    assert fake.submitted[0]["fields"]["work_date"] == date.today().isoformat()
+    sc.get("/history?range=today")
+    assert fake.list_calls[-1][2] == today.isoformat(), "今天 = 起止都是今天"
+    assert fake.list_calls[-1][3] == today.isoformat()
 
 
-def test_history_range_drives_window_and_total(sc, configured, monkeypatch):
-    """服务端默认只给近 7 天：客户端必须显式传区间，并把 total 透传上去"""
+def test_history_custom_range_and_echo(sc, configured, monkeypatch):
+    """员工手选日期：起止照传，并且要回显"真正生效"的区间。
+
+    回显不是装饰：只填起始日时结束日由服务端补成今天，界面上必须让员工看见
+    到底查到哪天，否则"我明明选了 9 月 1 日，为什么出来 60 条"没法解释。
+    """
     from datetime import date, timedelta
 
     fake = FakeClient()
     monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
     today = date.today()
 
-    data = sc.get("/history?range=30").get_json()
-    assert data["total"] == 42, "total 要透传，否则界面只能显示本页条数"
-    employee, size, start, end = fake.list_calls[-1]
-    assert employee == "张三"
-    assert start == (today - timedelta(days=29)).isoformat()
-    assert end == today.isoformat()
+    data = sc.get("/history?range=custom&start=2026-09-01&end=2026-09-30").get_json()
+    assert fake.list_calls[-1][2] == "2026-09-01"
+    assert fake.list_calls[-1][3] == "2026-09-30"
+    assert (data["start"], data["end"]) == ("2026-09-01", "2026-09-30")
+    assert data["size"] == 60, "30 天跨度边界上按小范围处理，没必要拉 200 条"
 
-    sc.get("/history?range=all")
-    assert fake.list_calls[-1][2] == "2000-01-01", "全部区间要绕开服务端默认的 7 天窗口"
+    # 只填起始日 → 补到今天
+    data = sc.get("/history?range=custom&start=2026-09-01").get_json()
+    assert (data["start"], data["end"]) == ("2026-09-01", today.isoformat())
 
-    sc.get("/history?range=abc")
-    assert fake.list_calls[-1][2] == (today - timedelta(days=6)).isoformat(), "非法值回退近 7 天"
+    # 只填结束日 → 就只看那一天（员工的直觉是"到 9 月 30 日为止的那批"，
+    # 但起止都不给会变成全量查询，所以单边缺省一律收窄）
+    data = sc.get("/history?range=custom&end=2026-09-30").get_json()
+    assert (data["start"], data["end"]) == ("2026-09-30", "2026-09-30")
+
+    # 起止写反 → 自动纠正，不返回空列表
+    data = sc.get("/history?range=custom&start=2026-09-30&end=2026-09-01").get_json()
+    assert (data["start"], data["end"]) == ("2026-09-01", "2026-09-30")
+
+    # 两头都不给 / 脏值 → 当没筛，退回近 7 天（不能把列表清空）
+    for q in ("?range=custom", "?range=custom&start=xx&end=yy"):
+        data = sc.get(f"/history{q}").get_json()
+        assert data["range"] == "7"
+        assert data["start"] == (today - timedelta(days=6)).isoformat()
+
+    # 跨度 ≥ 30 天才拉满 200 条
+    data = sc.get("/history?range=custom&start=2026-01-01&end=2026-09-30").get_json()
+    assert data["size"] == 200
 
 
+# ========== 跨站请求与 Origin 校验 ==========
 def test_cross_site_write_rejected(sc, configured):
     """带外站 Origin 的写请求必须 403：CORS 挡不住请求被执行"""
     evil = sc.post("/config", json={"employee_name": "黑客"}, headers={"Origin": "http://evil.example"})
@@ -467,49 +475,6 @@ def test_cross_site_read_is_not_rejected(sc, configured, monkeypatch):
     """只拦写：GET 不拦（读的是本机自己的数据，且白名单响应头已挡住外站读取）"""
     monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
     assert sc.get("/status", headers={"Origin": "http://evil.example"}).status_code == 200
-
-
-def test_cross_site_write_rejected(sc, configured):
-    """带外站 Origin 的写请求必须 403：CORS 挡不住请求被执行"""
-    evil = sc.post("/config", json={"employee_name": "黑客"}, headers={"Origin": "http://evil.example"})
-    assert evil.status_code == 403
-    assert load_config().employee_name == "张三", "被拒的请求不能改到配置"
-
-    ok = sc.post("/config", json={"employee_name": "李四"}, headers={"Origin": "tauri://localhost"})
-    assert ok.status_code == 200
-    assert load_config().employee_name == "李四"
-
-    # 本机程序（curl / worker）不带 Origin，要放行
-    assert sc.post("/config", json={"employee_name": "王五"}).status_code == 200
-
-
-def test_cross_site_read_is_not_rejected(sc, configured, monkeypatch):
-    """只拦写：GET 不拦（读的是本机自己的数据，且白名单响应头已挡住外站读取）"""
-    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
-    assert sc.get("/status", headers={"Origin": "http://evil.example"}).status_code == 200
-
-
-# ========== 版本与诊断 ==========
-def test_status_exposes_version_and_log_dir(sc, configured, monkeypatch):
-    """员工报障时靠这两个字段确认装的哪一版、日志在哪"""
-    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: FakeClient())
-    data = sc.get("/status").get_json()
-
-    assert data["version"] == sidecar_server.__version__
-    assert data["log_dir"].endswith("logs")
-
-
-def test_open_log_dir_uses_fixed_path(sc, configured, monkeypatch):
-    """日志目录由服务端固定，不接受参数——不能变成任意目录打开器"""
-    import os
-
-    from client.sidecar.config import app_data_dir
-
-    opened: list[str] = []
-    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
-
-    assert sc.post("/logs/open").get_json()["ok"] is True
-    assert opened == [str(app_data_dir() / "logs")]
 
 
 # ========== 版本与诊断 ==========
@@ -561,7 +526,81 @@ def test_export_passes_filename_rule(sc, configured, monkeypatch):
 
 
 def test_export_bad_filename_rule_falls_back(sc, configured, monkeypatch):
-    """脏配置在 sidecar 收口，不把非法值传进 worker"""
-    sc.post("/config", json={"filename_rule": "../../evil"})
+    """config.json 被手工改坏时，sidecar 收口不让非法值进 worker"""
+    cfg = load_config()
+    cfg.filename_rule = "../../evil"
+    save_config(cfg)  # 绕过 /config 直接落盘，模拟员工手改了配置文件
 
     assert _export_params(sc, configured, monkeypatch)["filename_rule"] == "author_title"
+
+
+def test_config_rejects_out_of_range_values(sc, configured):
+    """设置页滑块有范围，HTTP 接口也必须挡。
+
+    原来 /config 只判 hasattr，直接 POST jpg_quality=999 就能把 PS 导出参数
+    搞坏，而且这个值会写进 config.json，下次启动继续生效。
+    """
+    assert sc.post("/config", json={"filename_rule": "../../evil"}).status_code == 400
+    assert sc.post("/config", json={"jpg_quality": 999}).status_code == 400
+    assert sc.post("/config", json={"jpg_quality": 0}).status_code == 400
+    assert sc.post("/config", json={"theme": "neon"}).status_code == 400
+    assert sc.post("/config", json={"auto_clear": "yes"}).status_code == 400
+    assert sc.post("/config", json={"partners": "不是数组"}).status_code == 400
+    assert sc.post("/config", json={"nonsense": 1}).status_code == 400
+
+    # 整包拒绝：不能出现"一半新值一半旧值"
+    cfg = load_config()
+    assert cfg.jpg_quality == 10
+    assert cfg.theme == "dark"
+    assert cfg.filename_rule == "author_title"
+
+
+def test_config_accepts_numeric_strings_for_coords(sc, configured):
+    """窗口坐标允许字符串数字：Rust 侧算出来的值偶尔以字符串传回来"""
+    assert sc.post("/config", json={"win_x": "120", "win_y": 340}).status_code == 200
+    cfg = load_config()
+    assert cfg.win_x == 120
+    assert cfg.win_y == 340
+
+
+HANGING_WORKER = "import time; time.sleep(60)"
+
+
+def test_cancel_returns_cancelled_and_skips_failure_record(sc, configured, monkeypatch):
+    """取消 = 员工不想等了，不是失败：不能上报一条 failed 记录把成功率拉低"""
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+
+    def spawn(self, task_dir):
+        # 永远不写终态的"卡死的 worker"，模拟 PS 挂在对话框上
+        return subprocess.Popen(
+            [sys.executable, "-c", HANGING_WORKER],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    monkeypatch.setattr(Executor, "_spawn_worker", spawn)
+
+    start = sc.post(
+        "/export", json={"template_id": "tpl-1.psd", "author": "张三", "title": "测试"}
+    ).get_json()
+    assert start["ok"] is True, start
+    task_id = start["task_id"]
+
+    resp = sc.post("/export/cancel", json={"task_id": task_id})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True, resp.get_json()
+
+    final = sc.get(f"/export/status?task_id={task_id}").get_json()
+    assert final["finished"] is True
+    assert final["cancelled"] is True
+    assert final["ok"] is False
+    # 关键断言：失败记录一条都不许有
+    assert fake.submitted == []
+
+
+def test_cancel_without_running_task_is_soft_error(sc, configured):
+    """没有任务在跑时取消：返回 ok=false 但仍是 200，别让前端弹红条"""
+    resp = sc.post("/export/cancel", json={})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is False

@@ -6,7 +6,7 @@
   records      录用记录（= 工作日志）
 
 模板与合作伙伴名单由员工在本机客户端维护，不经服务器，所以这里没有
-templates / dict_items 两张表。
+templates / dict_items 两张表——后台只负责查看数据，不代管这些配置。
 """
 
 from __future__ import annotations
@@ -40,7 +40,9 @@ class AdminUser(db.Model):
     id = Column(Integer, primary_key=True)
     username = Column(String(64), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
-    # admin 可维护字典/模板；viewer 只读
+    # admin 可删除/恢复记录、重推日报；viewer 只读。
+    # 「只读」指的是不改数据：查看、筛选、导出 CSV 两种角色都放行——
+    # 导出不写库、只在 audit_logs 留一条流水，挡下来只会让人截图抄表格。
     role = Column(String(16), nullable=False, default="viewer")
     is_active = Column(Boolean, nullable=False, default=True)
     last_login_at = Column(DateTime)
@@ -68,7 +70,6 @@ class AdminUser(db.Model):
 
 class Record(db.Model):
     """一次生成 = 一条工作日志"""
-
     __tablename__ = "records"
 
     id = Column(Integer, primary_key=True)
@@ -106,24 +107,29 @@ class Record(db.Model):
         Index("idx_records_partner_date", "partner_name", "work_date"),
         Index("idx_records_created_at_id", "created_at", "id"),
         # 去重兜底：同一天 + 同一员工 + 同一模板 + 同作者 + 同标题
-        # 只允许一条未删除记录。路由层的"先查后插"挡不住并发，必须由数据库兜底。
+        # 只允许一条未删除的**成功**记录。路由层的"先查后插"挡不住并发，必须由数据库兜底。
         #
-        # 键的构成有讲究，两个都踩过：
+        # 键的构成有讲究，三个都踩过：
         #   - 带上 employee_name：原来只按 (work_date, author, title) 判重，
         #     两个员工同一天做同一篇稿子时，第二个人被判"重复提交"，
         #     白跑一次 PS 还拿不到记录。
         #   - 带上 template_name：同一员工同一天用两个期刊模板出同一篇稿
         #     是真实业务，不能拦。拦了员工只能改标题造假，比重复记录更糟。
-        # 剩下的语义是"同一个人用同一个模板重复做了同一件事"——那才是误操作。
+        #   - 带上 status = 'success'：失败的尝试也要入库（否则"今天怎么这么慢"
+        #     查不出原因），但失败记录不能参与判重——PS 没开导致失败后，员工
+        #     修好再点一次同一篇稿，会被自己刚才那条失败记录挡成 409
+        #     "请勿重复提交"，只能改标题造假或等管理员删记录。这是必修的洞。
+        #
+        # 剩下的语义是"同一个人用同一个模板重复做成了同一件事"——那才是误操作。
         Index(
-            "uq_records_dedup_active",
+            "uq_records_dedup_success",
             "work_date",
             "employee_name",
             "template_name",
             "author",
             "title",
             unique=True,
-            sqlite_where=text("is_deleted = 0"),
+            sqlite_where=text("is_deleted = 0 AND status = 'success'"),
         ),
     )
 

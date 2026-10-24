@@ -1,11 +1,14 @@
 import contextlib
 import logging
-import re
 import sys
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import List
+
+from .ps_doc_ops import apply_document_replacements
+from .ps_text import match_text as _match_text_impl
+from .ps_text import replace_text as _replace_text_impl
 
 logger = logging.getLogger(__name__)
 
@@ -154,51 +157,14 @@ class PSConnector:
             ) from exc
 
     def _match_text(self, source: str, pattern: str, regex: bool, match_mode: str) -> bool:
-        """
-        Check whether text matches pattern.
-        """
-        # Normalize line endings for robust matching (PS often uses \r)
-        # 将所有类型的换行符统一转换为 \n
-        source_norm = source.replace("\r\n", "\n").replace("\r", "\n")
-        pattern_norm = pattern.replace("\r\n", "\n").replace("\r", "\n")
-
-        if regex:
-            # Use DOTALL so . matches newlines if needed, or user specifies it.
-            # But let's keep it simple. If user wants multiline they use (?s)
-            return re.search(pattern, source) is not None
-
-        if match_mode == "精确":
-            return source_norm == pattern_norm
-
-        return pattern_norm in source_norm
+        """Check whether text matches pattern.（实现收拢到 ps_text，方法保留供调用方使用）"""
+        return _match_text_impl(source, pattern, regex, match_mode)
 
     def _replace_text(
         self, source: str, pattern: str, replacement: str, regex: bool, match_mode: str
     ) -> str:
-        """
-        Replace text according to configuration.
-        """
-        if regex:
-            # 用 lambda 返回字面量，避免用户输入中的反斜杠/反向引用（\1、\g<name>）
-            # 被 re.sub 解释导致替换内容被篡改或报错
-            return re.sub(pattern, lambda m: replacement, source)
-
-        if match_mode == "精确":
-            # For exact replacement, we just return the replacement
-            # Note: we used normalized form for checking, but here we just return the replacement.
-            # If it was an exact match, the whole string is replaced.
-            return replacement
-
-        # For fuzzy match, we need to be careful with line endings.
-        # But for simplicity, let's just use standard replace.
-        # If pattern had \n and source has \r, direct replace fails.
-        # So we might need to handle that if strict robustness is required.
-        # For now, let's try direct replace, but if it fails, try replacing \r with \n in source?
-        # That would modify the original line endings of the non-replaced parts,
-        # which might be undesirable.
-        # Let's assume simple string replace is fine for most cases,
-        # but warn user about line endings if they are advanced.
-        return source.replace(pattern, replacement)
+        """Replace text according to configuration.（实现收拢到 ps_text，方法保留供调用方使用）"""
+        return _replace_text_impl(source, pattern, replacement, regex, match_mode)
 
     def get_all_text_layers(self, document) -> List[str]:
         """
@@ -242,88 +208,13 @@ class PSConnector:
         """
         Apply text replacements to all text layers of document (recursively).
 
-        Parameters
-        ----------
-        document:
-            Photoshop document object.
-        replacements:
-            Iterable of replacement definitions.
-
-        Returns
-        -------
-        Optional[str]
-            First non-empty replacement text used for file naming.
-
-        Notes
-        -----
+        实现收拢到 ps_doc_ops（方法保留供调用方使用）。
         替换失败的图层会记录在 self.last_replacement_warnings 中（同时写入日志），
         不再静默吞掉。成功路径返回值结构保持不变。
         """
-        first_replacement_text: str | None = None
         warnings: List[str] = []
         self.last_replacement_warnings = warnings
-
-        def process_layers(layers_obj):
-            """
-            递归遍历图层组，对文本图层应用替换规则。
-
-            Args:
-                layers_obj: Photoshop 图层集合对象
-            """
-            nonlocal first_replacement_text
-            for layer in layers_obj:
-                # 检查是否为 LayerSet (Group)，如果是则递归
-                if getattr(layer, "TypeName", "") == "LayerSet":
-                    process_layers(layer.Layers)
-                    continue
-
-                # 检查是否为文本图层 (Kind == 2 usually implies TextLayer)
-                # 更加稳健的方式是检查有没有 TextItem 属性
-                if getattr(layer, "Kind", None) != 2:
-                    continue
-
-                try:
-                    text_item = layer.TextItem
-                    # Explicitly convert to string to avoid COM object issues
-                    original = str(text_item.Contents)
-                    new_text = original
-
-                    for cfg in replacements:
-                        find = str(cfg.get("find", ""))
-                        replace = str(cfg.get("replace", ""))
-                        regex = bool(cfg.get("regex", False))
-                        match_mode = str(cfg.get("match_mode", "精确"))
-
-                        if not find:
-                            continue
-
-                        try:
-                            if self._match_text(new_text, find, regex, match_mode):
-                                new_text = self._replace_text(
-                                    new_text, find, replace, regex, match_mode
-                                )
-                                if first_replacement_text is None and replace:
-                                    first_replacement_text = replace
-                        except re.error as e:
-                            # 非法正则：记录失败图层到警告列表，不再静默吞掉
-                            layer_name = getattr(layer, "Name", "未知图层")
-                            warning = f"图层「{layer_name}」正则规则无效，已跳过: {find!r} ({e})"
-                            warnings.append(warning)
-                            logger.warning(warning)
-
-                    if new_text != original:
-                        text_item.Contents = new_text
-
-                except (AttributeError, TypeError) as e:
-                    # 图层属性访问错误或类型错误，记录但继续处理其他图层
-                    logger.error(f"处理图层 {getattr(layer, 'Name', 'Unknown')} 时出错: {e}")
-                except Exception as e:
-                    # 其他未预期的错误，记录但继续
-                    logger.error(f"处理图层 {getattr(layer, 'Name', 'Unknown')} 时发生未预期错误: {e}")
-
-        # 从文档顶层图层开始
-        process_layers(document.Layers)
-        return first_replacement_text
+        return apply_document_replacements(document, replacements, warnings)
 
     def export_document(
         self, document, output_path: Path, output_format: str, quality: int = 12

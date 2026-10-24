@@ -16,7 +16,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from .ps_com_errors import format_com_error
 from .ps_connector import COM_AVAILABLE, PSConnector
+from .ps_text import check_text_overflow, match_text, replace_text, safe_layer_name
 
 logger = logging.getLogger(__name__)
 
@@ -24,80 +26,6 @@ if COM_AVAILABLE:  # pragma: no branch
     import pywintypes
 else:  # pragma: no cover - 非 Windows
     pywintypes = None  # type: ignore[assignment]
-
-
-# ========== COM 错误人话翻译 ==========
-# 常见 HRESULT → 员工能照着做的动作（32 位有符号值，与 com_error.hresult 一致）
-_COM_ERROR_MESSAGES: Dict[int, str] = {
-    -2147221005: "Photoshop 未运行，请先启动 Photoshop 再点执行",
-    -2147221021: "无法创建 Photoshop COM 对象，请检查 Photoshop 是否安装完整",
-    -2147417848: "Photoshop 进程已终止或无响应，请重启 Photoshop 后重试",
-    -2147467259: "Photoshop 操作失败或超时，请重试；若反复出现请重启 Photoshop",
-    -2147220995: "Photoshop 服务不可用，请重启 Photoshop 后重试",
-    -2147024864: "文件被占用，请关闭占用该模板文件的程序后重试",  # 0x80070020
-    -2147024784: "磁盘空间已满，请清理磁盘空间后重试",  # 0x80070070
-    -2147024891: "没有权限访问该文件，请关闭占用程序或以管理员身份运行后重试",  # 0x80070005
-    -2147024894: "文件不存在，请检查文件路径是否正确",  # 0x80070002
-    -2147024893: "路径不存在，请检查输出目录设置是否正确",  # 0x80070003
-    -2147418111: "Photoshop 正忙（可能正在启动或有弹窗未处理），请稍候再重试",  # 0x80010001
-    -2147023170: "与 Photoshop 的连接已断开（进程可能崩溃），请重启 Photoshop 后重试",  # 0x800706BE
-    -2146959355: "无法启动 Photoshop，请手动打开 Photoshop 后再点执行",  # 0x80080005
-}
-
-# excepinfo / 错误文本关键字 → 白话指引（小写 contains，按序命中即返回）。
-# 顺序有讲究：具体场景（暂存盘/字体/许可证）必须排在通用场景（disk）之前。
-_COM_ERROR_KEYWORD_RULES: List[Tuple[Tuple[str, ...], str]] = [
-    (
-        ("scratch disk", "scratch", "暂存盘"),
-        "Photoshop 暂存盘空间不足，请清理磁盘空间或在 Photoshop 中更换暂存盘位置后重试",
-    ),
-    (
-        ("font", "字体"),
-        "缺少字体，请安装模板所用字体或确认 Photoshop 能正常加载字体后重试",
-    ),
-    (
-        (
-            "license",
-            "licen",
-            "activated",
-            "activation",
-            "serial",
-            "trial",
-            "许可",
-            "激活",
-            "授权",
-            "订阅",
-        ),
-        "Photoshop 未激活或许可证已过期，请先打开 Photoshop 完成登录/激活后再点执行",
-    ),
-    (
-        ("sharing violation", "in use", "being used", "locked", "占用", "正在使用"),
-        "文件被占用，请关闭占用该模板文件的程序后重试",
-    ),
-    (
-        ("disk full", "no space", "not enough space", "磁盘", "空间不足"),
-        "磁盘空间不足，请清理磁盘空间后重试",
-    ),
-    (
-        ("could not be found", "not found", "找不到", "不存在"),
-        "文件不存在，请检查文件路径是否正确",
-    ),
-    (("out of memory", "内存不足"), "内存不足，请关闭其他占用内存的程序后重试"),
-    (("not responding", "无响应"), "Photoshop 无响应，请重启 Photoshop 后重试"),
-]
-
-
-def _extract_com_error_text(error: Any) -> str:
-    """汇总 COM 异常中可用于关键字匹配的文本（excepinfo 描述 + 原始消息）"""
-    parts: List[str] = [str(error)]
-    # pywintypes.com_error.args = (hresult, message, excepinfo, ...)
-    for arg in getattr(error, "args", None) or ():
-        if isinstance(arg, str):
-            parts.append(arg)
-        elif isinstance(arg, (tuple, list)):
-            # excepinfo 元组：(source, description, helpfile, helpcontext, ...)
-            parts.extend(item for item in arg if isinstance(item, str))
-    return " ".join(parts)
 
 
 class PSService:
@@ -133,16 +61,8 @@ class PSService:
             return False, f"无法连接到 Photoshop: {e}"
 
     def _format_com_error(self, error: Any) -> str:
-        """COM 错误 → 人话。HRESULT 精确命中优先，其次关键字 contains。"""
-        hresult = getattr(error, "hresult", 0)
-        if hresult in _COM_ERROR_MESSAGES:
-            return _COM_ERROR_MESSAGES[hresult]
-
-        text = _extract_com_error_text(error).lower()
-        for keywords, friendly in _COM_ERROR_KEYWORD_RULES:
-            if any(keyword in text for keyword in keywords):
-                return friendly
-        return f"COM 错误 (代码: {hresult}): {error}"
+        """COM 错误 → 人话（委托 ps_com_errors，方法保留供调用方使用）"""
+        return format_com_error(error)
 
     def is_connected(self) -> bool:
         return self._connector.app is not None
@@ -239,15 +159,15 @@ class PSService:
                             if not find:
                                 continue
                             try:
-                                if self._match_text(new_text, find, use_regex, match_mode):
+                                if match_text(new_text, find, use_regex, match_mode):
                                     matched_rules.add(rule_index)
-                                    new_text = self._replace_text(
+                                    new_text = replace_text(
                                         new_text, find, replace, use_regex, match_mode
                                     )
                                     if first_replacement_text is None and replace:
                                         first_replacement_text = replace
                             except re.error as e:
-                                layer_name = self._safe_layer_name(layer)
+                                layer_name = safe_layer_name(layer)
                                 warning = (
                                     f"图层「{layer_name}」正则规则无效，已跳过: {find!r} ({e})"
                                 )
@@ -257,7 +177,9 @@ class PSService:
                         if new_text != original:
                             text_item.Contents = new_text
                             changed_layer_count += 1
-                            self._check_layer_overflow(layer, text_item, available_fonts, warnings)
+                            check_text_overflow(
+                                self._current_document, layer, text_item, available_fonts, warnings
+                            )
 
                     except (AttributeError, TypeError):
                         continue
@@ -290,59 +212,6 @@ class PSService:
                 return False, None, f"文本替换失败: {msg}"
             logger.error("文本替换未知错误: %s", e)
             return False, None, f"文本替换失败: {e}"
-
-    def _check_layer_overflow(
-        self,
-        layer: Any,
-        text_item: Any,
-        available_fonts: "set[str] | None",
-        warnings: List[str],
-    ) -> None:
-        """替换后检查字体可用性与文本是否溢出画布，只告警不阻断。"""
-        layer_name = self._safe_layer_name(layer)
-        try:
-            if available_fonts is not None and str(text_item.Font) not in available_fonts:
-                warnings.append(f"图层「{layer_name}」字体不可用，请检查替代字体")
-        except Exception:  # noqa: BLE001
-            warnings.append(f"图层「{layer_name}」字体未验证")
-
-        try:
-            bounds = [float(v) for v in layer.Bounds]
-            width = float(self._current_document.Width)
-            height = float(self._current_document.Height)
-            if bounds[0] < 0 or bounds[1] < 0 or bounds[2] > width or bounds[3] > height:
-                warnings.append(f"图层「{layer_name}」文本超出画布")
-            if int(text_item.Kind) == 2:
-                warnings.append(f"图层「{layer_name}」段落框内部溢出未验证，请打开成品图确认")
-        except Exception:  # noqa: BLE001
-            warnings.append(f"图层「{layer_name}」文本边界未验证")
-
-    @staticmethod
-    def _safe_layer_name(layer: Any) -> str:
-        try:
-            return str(getattr(layer, "Name", "未知图层"))
-        except Exception:  # noqa: BLE001
-            return "未知图层"
-
-    @staticmethod
-    def _match_text(source: str, pattern: str, regex: bool, match_mode: str) -> bool:
-        # PS 的换行常是 \r，统一成 \n 再比对，否则"精确"永远匹配不上
-        source_norm = source.replace("\r\n", "\n").replace("\r", "\n")
-        pattern_norm = pattern.replace("\r\n", "\n").replace("\r", "\n")
-        if regex:
-            return re.search(pattern, source) is not None
-        if match_mode == "精确":
-            return source_norm == pattern_norm
-        return pattern_norm in source_norm
-
-    @staticmethod
-    def _replace_text(source: str, pattern: str, replacement: str, regex: bool, match_mode: str) -> str:
-        if regex:
-            # 用 lambda 返回字面量：用户输入里的 \1、\g<name> 不会被 re.sub 当成反向引用
-            return re.sub(pattern, lambda m: replacement, source)
-        if match_mode == "精确":
-            return replacement
-        return source.replace(pattern, replacement)
 
     def get_all_text_layers(self) -> List[str]:
         """列出当前文档所有文本图层内容（用于模板占位符体检）"""

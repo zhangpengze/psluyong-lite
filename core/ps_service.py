@@ -1,22 +1,24 @@
 """Photoshop 自动化服务
 
-封装 COM 操作：连接、打开 PSD、文本替换、导生成片。
+封装 COM 操作：连接、打开 PSD、文本替换、导出成品。
 逻辑移植自 psluyong，去掉 UI 接口依赖，保留全部加固点：COM 错误 → 人话翻译
-（HRESULT 表 + 关键字规则）、零匹配治理（没有图层被替换时不返回假成功）、
-导出后校验文件真实落盘、字体可用性 / 文本超出画布告警。
+（HRESULT 表 + 关键字规则）、零匹配与必填占位符治理、导出后校验真实落盘、
+字体可用性 / 文本超出画布告警。
+
+文本替换的流程在 ps_replace_flow、导出前体检在 ps_preflight、连接重试在
+ps_retry——这里只做装配与错误翻译，避免单文件越过 300 行的可维护上限。
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .ps_com_errors import format_com_error
 from .ps_connector import COM_AVAILABLE, PSConnector
 from .ps_preflight import document_info, prepare_for_export
-from .ps_text import check_text_overflow, match_text, replace_text, safe_layer_name
+from .ps_replace_flow import apply_replacements
 
 logger = logging.getLogger(__name__)
 
@@ -112,107 +114,16 @@ class PSService:
     def apply_text_replacements(
         self, replacements: List[Dict[str, Any]]
     ) -> Tuple[bool, "str | None", str]:
-        """
-        对当前文档所有文本图层应用替换规则。
+        """对当前文档应用替换规则。流程与三道治理见 ps_replace_flow。
 
         Returns:
             (是否成功, 第一个替换文本（用于文件名）, 错误信息)
         """
         if not self._current_document:
             return False, None, "没有打开的文档"
-
-        first_replacement_text: "str | None" = None
         warnings: List[str] = []
         self.last_replacement_warnings = warnings
-        changed_layer_count = 0
-        matched_rules: set[int] = set()
-
-        try:
-            try:
-                available_fonts = {
-                    str(font.PostScriptName) for font in self._current_document.Application.Fonts
-                }
-            except Exception:  # noqa: BLE001 - 取不到字体表不阻断生成，只降级为告警
-                available_fonts = None
-                warnings.append("字体可用性未验证，请打开成品图确认")
-
-            def process_layers(layers_obj: Any) -> None:
-                nonlocal first_replacement_text, changed_layer_count
-
-                for layer in layers_obj:
-                    if getattr(layer, "TypeName", "") == "LayerSet":
-                        process_layers(layer.Layers)
-                        continue
-                    # Kind == 2 表示文本图层
-                    if getattr(layer, "Kind", None) != 2:
-                        continue
-
-                    try:
-                        text_item = layer.TextItem
-                        original = str(text_item.Contents)
-                        new_text = original
-
-                        for rule_index, cfg in enumerate(replacements):
-                            find = str(cfg.get("find", ""))
-                            replace = str(cfg.get("replace", ""))
-                            use_regex = bool(cfg.get("regex", False))
-                            match_mode = str(cfg.get("match_mode", "精确"))
-                            if not find:
-                                continue
-                            try:
-                                if match_text(new_text, find, use_regex, match_mode):
-                                    matched_rules.add(rule_index)
-                                    new_text = replace_text(
-                                        new_text, find, replace, use_regex, match_mode
-                                    )
-                                    if first_replacement_text is None and replace:
-                                        first_replacement_text = replace
-                            except re.error as e:
-                                layer_name = safe_layer_name(layer)
-                                warning = (
-                                    f"图层「{layer_name}」正则规则无效，已跳过: {find!r} ({e})"
-                                )
-                                warnings.append(warning)
-                                logger.warning(warning)
-
-                        if new_text != original:
-                            text_item.Contents = new_text
-                            changed_layer_count += 1
-                            check_text_overflow(
-                                self._current_document, layer, text_item, available_fonts, warnings
-                            )
-
-                    except (AttributeError, TypeError):
-                        continue
-
-            process_layers(self._current_document.Layers)
-
-            for index, cfg in enumerate(replacements):
-                if cfg.get("find") and index not in matched_rules:
-                    warnings.append(f"第 {index + 1} 条替换规则未命中，请核对成品")
-
-            # 零匹配治理：没有任何图层被替换时不能返回成功，
-            # 否则会导出一张与模板一模一样的图，员工以为做完了。
-            if changed_layer_count == 0:
-                logger.warning("文本替换零匹配：未找到任何可替换的文本")
-                return (
-                    False,
-                    None,
-                    "未找到任何可替换的文本，请检查模板占位符与查找规则是否一致",
-                )
-
-            return True, first_replacement_text, ""
-
-        except (AttributeError, RuntimeError) as e:
-            logger.error("文本替换失败: %s", e)
-            return False, None, f"文本替换失败: {e}"
-        except Exception as e:  # noqa: BLE001 - 兜底翻译 COM 错误
-            if pywintypes is not None and isinstance(e, pywintypes.com_error):
-                msg = format_com_error(e)
-                logger.error("文本替换 COM 错误: %s", msg)
-                return False, None, f"文本替换失败: {msg}"
-            logger.error("文本替换未知错误: %s", e)
-            return False, None, f"文本替换失败: {e}"
+        return apply_replacements(self._current_document, replacements, warnings)
 
     def get_all_text_layers(self) -> List[str]:
         """列出当前文档所有文本图层内容（用于模板占位符体检）"""

@@ -754,3 +754,112 @@ def test_status_surfaces_unsynced_tasks(sc, configured, monkeypatch):
     os.utime(task_dir / "status.json", (stale, stale))
 
     assert sc.get("/status").get_json()["unsynced"] >= 1
+
+
+# ---------- 测试连接：必须用表单里的值 ----------
+
+def test_config_test_uses_submitted_values_not_saved_config(sc, configured, monkeypatch):
+    """磁盘上存的是 http://127.0.0.1:8080 + key=k；表单里填的是另一台。
+
+    以前这个按钮打 /status，测的是磁盘配置，提示却打印表单地址 —— 改完地址
+    提示"连接成功"，一保存就连不上。这里钉住"测的就是传进来的这一份"。
+    """
+    from client.sidecar import conn_test
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_probe(server_url: str, api_key: str):
+        seen.append((server_url, api_key))
+        return {"level": "ok", "message": "连接成功", "server_reachable": True, "key_ok": True}
+
+    monkeypatch.setattr(conn_test, "probe", fake_probe)
+
+    resp = sc.post(
+        "/config/test", json={"server_url": "http://10.1.2.3:9000", "api_key": "new-key"}
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert seen == [("http://10.1.2.3:9000", "new-key")], "必须用表单值，不能读磁盘"
+
+
+def test_config_test_reports_failure_through_result_not_http_status(sc, configured, monkeypatch):
+    """连不上是"结论"不是"请求失败"：HTTP 200 + level=unreachable，
+    否则前端会把它当接口异常，提示反而变模糊。"""
+    from client.sidecar import conn_test
+
+    monkeypatch.setattr(
+        conn_test,
+        "probe",
+        lambda url, key: {
+            "level": "unreachable",
+            "message": "连不上",
+            "server_reachable": False,
+            "key_ok": False,
+        },
+    )
+    data = sc.post("/config/test", json={"server_url": "http://x", "api_key": "k"}).get_json()
+    assert data["ok"] is True and data["result"]["level"] == "unreachable"
+
+
+def test_config_test_tolerates_empty_body(sc, configured):
+    """地址没填就点测试：给话说，不许 500"""
+    data = sc.post("/config/test", json={}).get_json()
+    assert data["ok"] is True
+    assert data["result"]["level"] == "invalid"
+
+
+def test_config_test_rejects_cross_site_origin(sc, configured):
+    """写接口的来源校验对它同样生效：恶意网页不能借本机 sidecar 探内网"""
+    resp = sc.post(
+        "/config/test",
+        json={"server_url": "http://169.254.169.254", "api_key": "k"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+# ---------- 一键诊断包 ----------
+
+def test_diagnostics_save_writes_bundle_and_does_not_open_explorer(sc, configured, tmp_path, monkeypatch):
+    """界面按钮走这条：存到固定目录 + 尝试打开。
+
+    测试里必须把"打开资源管理器"打掉——否则跑一次测试弹一个窗口。
+    """
+    from client.sidecar import routes_shell
+
+    monkeypatch.setattr(routes_shell, "_diagnostics_dir", lambda: tmp_path)
+    monkeypatch.setattr(routes_shell, "_reveal", lambda path: None)
+
+    resp = sc.post("/diagnostics/save")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    saved = Path(data["path"])
+    assert saved.is_file() and saved.suffix == ".zip"
+    assert saved.parent == tmp_path
+
+
+def test_diagnostics_save_reports_failure_without_500(sc, configured, tmp_path, monkeypatch):
+    from client.sidecar import diagnostics, routes_shell
+
+    monkeypatch.setattr(routes_shell, "_diagnostics_dir", lambda: tmp_path)
+    monkeypatch.setattr(routes_shell, "_reveal", lambda path: None)
+    monkeypatch.setattr(
+        diagnostics, "build_bundle", lambda *a, **kw: (_ for _ in ()).throw(OSError("磁盘满"))
+    )
+
+    data = sc.post("/diagnostics/save").get_json()
+    assert data["ok"] is False and "磁盘满" in data["error"]
+
+
+def test_diagnostics_download_is_a_zip(sc, configured, tmp_path, monkeypatch):
+    from client.sidecar import diagnostics
+
+    fake = tmp_path / "x.zip"
+    fake.write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(diagnostics, "build_bundle", lambda *a, **kw: fake)
+    resp = sc.get("/diagnostics")
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"PK"), "必须是 zip 流，否则员工拿到一堆乱码"

@@ -160,9 +160,22 @@ def run_export(req: ExportRequest) -> ExportResult:
         # 必须用「包含」替换（文字替换文字）。用「精确」全等匹配永远命中不了，
         # 会直接踩零匹配治理判失败——员工侧表现是"一点生成就报错"。
         # {{作者}} 这类独立占位符在包含模式下同样生效，两种模板写法都兼容。
+        # required=True：这两处是表单必填项，少一处成品就缺内容，必须判失败
         replacements = [
-            {"find": req.author_placeholder, "replace": author, "regex": False, "match_mode": "包含"},
-            {"find": req.title_placeholder, "replace": title, "regex": False, "match_mode": "包含"},
+            {
+                "find": req.author_placeholder,
+                "replace": author,
+                "regex": False,
+                "match_mode": "包含",
+                "required": True,
+            },
+            {
+                "find": req.title_placeholder,
+                "replace": title,
+                "regex": False,
+                "match_mode": "包含",
+                "required": True,
+            },
         ]
         ok, _, error = service.apply_text_replacements(replacements)
         warnings = list(getattr(service, "last_replacement_warnings", []) or [])

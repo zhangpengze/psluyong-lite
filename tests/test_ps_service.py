@@ -445,19 +445,78 @@ def test_empty_find_rule_skipped_without_unmatched_warning():
     assert svc.last_replacement_warnings == [], "空规则不产生未命中警告"
 
 
-def test_unmatched_rule_produces_warning():
+def test_missing_placeholder_fails_the_whole_generation():
+    """只缺一个占位符（比如标题被删）以前是 success —— 导出一张没标题的录用通知。
+
+    这是本组里最隐蔽的一条：图能生成、记录也上报成功，员工看到"完成"就走了，
+    错误要等作者拿到证书才发现。失败一条最多重试一次，代价小得多。
+    """
     svc, _ = new_service()
     layer = FakeLayer(name="正文", text="作者：{{作者}}")
     svc._current_document = FakeDoc([layer])
 
-    ok, _, _ = svc.apply_text_replacements(
+    ok, first, err = svc.apply_text_replacements(
         [
             {"find": "{{作者}}", "replace": "李四", "regex": False, "match_mode": "包含"},
-            {"find": "{{不存在的占位符}}", "replace": "王五", "regex": False, "match_mode": "包含"},
+            {"find": "{{标题}}", "replace": "草莓种植", "regex": False, "match_mode": "包含"},
         ]
     )
-    assert ok is True
-    assert "第 2 条替换规则未命中，请核对成品" in svc.last_replacement_warnings
+
+    assert ok is False, "缺一个必填占位符必须判失败"
+    assert first is None
+    assert "{{标题}}" in err, "错误文案要点名是哪个占位符没找到"
+    assert "{{作者}}" not in err, "命中的那个不该被列进来"
+    assert "逐字核对" in err, "要告诉员工去哪改，不能只说失败"
+
+
+def test_multiple_missing_placeholders_are_all_listed():
+    svc, _ = new_service()
+    svc._current_document = FakeDoc([FakeLayer(name="正文", text="作者：{{作者}}")])
+
+    ok, _, err = svc.apply_text_replacements(
+        [
+            {"find": "{{作者}}", "replace": "李四", "regex": False, "match_mode": "包含"},
+            {"find": "{{标题}}", "replace": "T", "regex": False, "match_mode": "包含"},
+            {"find": "{{刊期}}", "replace": "P", "regex": False, "match_mode": "包含"},
+        ]
+    )
+    assert ok is False and "{{标题}}" in err and "{{刊期}}" in err
+
+
+def test_explicitly_optional_rule_miss_is_only_a_warning():
+    """确实有"某些模板不带这一处"的场景：显式 required=False 时降级为告警。"""
+    svc, _ = new_service()
+    svc._current_document = FakeDoc([FakeLayer(name="正文", text="作者：{{作者}}")])
+
+    ok, first, _ = svc.apply_text_replacements(
+        [
+            {"find": "{{作者}}", "replace": "李四", "regex": False, "match_mode": "包含"},
+            {
+                "find": "{{可选刊期}}",
+                "replace": "P",
+                "regex": False,
+                "match_mode": "包含",
+                "required": False,
+            },
+        ]
+    )
+    assert ok is True and first == "李四"
+    assert any("未命中" in w for w in svc.last_replacement_warnings)
+
+
+def test_invalid_regex_rule_is_not_reported_as_missing_placeholder():
+    """正则写错是规则语法问题，不能说成"模板里找不到这个占位符"——那会把人引到模板上。"""
+    svc, _ = new_service()
+    svc._current_document = FakeDoc([FakeLayer(name="正文", text="作者：{{作者}}")])
+
+    ok, _, err = svc.apply_text_replacements(
+        [
+            {"find": "{{作者}}", "replace": "李四", "regex": False, "match_mode": "包含"},
+            {"find": "[unclosed", "replace": "x", "regex": True, "match_mode": "包含"},
+        ]
+    )
+    assert ok is True, "坏正则只跳过该规则，不拖垮整篇"
+    assert any("正则规则无效" in w for w in svc.last_replacement_warnings)
 
 
 def test_invalid_regex_warning_keeps_processing():

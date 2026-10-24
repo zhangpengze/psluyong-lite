@@ -18,7 +18,13 @@ const testing = ref(false)
 
 const urlOk = computed(() => isHttpUrl(props.form.server_url))
 
-/** 测试连接：立刻走一次 /status，把"连不上"具体化成可行动的信息 */
+/**
+ * 测试连接：用**表单里此刻填的**地址和 Key 真发一次请求。
+ *
+ * 以前的实现打 /status，而 /status 读的是磁盘上的旧配置 —— 员工改了地址点测试，
+ * 提示里打印的是新地址，实际测的是老地址：说"连接成功"，一保存就连不上。
+ * 现在四档结论分开报，"地址不通"和"Key 不对"是两句完全不同的话。
+ */
 async function testConnection() {
   if (!urlOk.value) {
     toast('服务器地址应以 http:// 开头', 'error')
@@ -26,12 +32,9 @@ async function testConnection() {
   }
   testing.value = true
   try {
-    const s = await api.status()
-    if (s.server_reachable) {
-      toast(`连接成功（${props.form.server_url}）`, 'success')
-    } else {
-      toast('连不上服务器：请检查地址、端口和网线', 'error')
-    }
+    const { result } = await api.testConfig(props.form.server_url, props.form.api_key)
+    const type = result.level === 'ok' ? 'success' : result.level === 'server_error' ? 'warning' : 'error'
+    toast(result.message, type)
   } catch (e) {
     toast(e instanceof Error ? e.message : '连接失败', 'error')
   } finally {

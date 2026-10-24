@@ -126,27 +126,43 @@
 
 ## 四、P1 重要（灰度期就要修，别等全量）
 
+> **2026-10-24 第二批已修 6 项**（1、2、3、9、10、15），每项都是「代码 + 用例 + 变异验证」：
+> 把逻辑改回旧行为，新用例必须变红，改回来必须变绿。变异数写在各项标题里。
+> 其余 12 项仍按原计划排在灰度期，未在本轮处理。
+
 ### 服务端
-1. **状态卡一行异常打挂整张卡**：`status.py:112-123` `_database_row` 直接 `Record.query...count()`，**没有 try/except**；同文件 `_dir_usage`/`_backup_row` 都做了降级。DB 一锁（WAL 下高峰期可能）→ `/api/v1/stats/overview` 与仪表盘一起 500。
-2. **`/health/ready` 只做 `SELECT 1`**（`health_service.py:14-16`）：磁盘满 / data 卷只读时写入全 500，readiness 依然 200；也不覆盖调度器存活。而 compose healthcheck 用的正是它——`restart: unless-stopped` **不会**因 unhealthy 重启，探针失败只是"显示不健康"。建议加 `DATA_DIR` 可写探测 + `scheduler.get_jobs()` + 最近 job 心跳。
-3. **告警是单通道且互相吞**：`report_alert.py:77-112` 全局单哨兵 + 300s 窗口，`scheduler.py:35-62` 三个运维告警连发时**只有第一条能出去**，后两条连日志都没有；而通道就是被监控的 NapCat 本身——NapCat 一挂，日报与告警**同时全静默**。建议节流键改 `(kind,title)`、被抑制的落日志、加本地告警文件 + 启动补偿推送。
+1. ✅ **已修**（变异 2/2 全红）**状态卡一行异常打挂整张卡**：`status.py:112-123` `_database_row` 直接 `Record.query...count()`，**没有 try/except**；同文件 `_dir_usage`/`_backup_row` 都做了降级。DB 一锁（WAL 下高峰期可能）→ `/api/v1/stats/overview` 与仪表盘一起 500。
+   → 现在五行全部经 `_safe_row` 取数，单行异常降级成「取数失败 · 异常类型」（带 `error` 原文与堆栈日志），整卡照常渲染；`_CACHE` 的读写补了 `threading.Lock`——8 线程 waitress 下并发读写一个 dict 本来也没保证。用例 `tests/test_system_status.py`（对五个行名参数化 + 概览接口仍 200 + 仪表盘仍出「取数失败」）。
+2. ✅ **已修**（变异 4/4 全红）**`/health/ready` 只做 `SELECT 1`**（`health_service.py:14-16`）：磁盘满 / data 卷只读时写入全 500，readiness 依然 200；也不覆盖调度器存活。而 compose healthcheck 用的正是它——`restart: unless-stopped` **不会**因 unhealthy 重启，探针失败只是"显示不健康"。建议加 `DATA_DIR` 可写探测 + `scheduler.get_jobs()` + 最近 job 心跳。
+   → 改成真写一次（`open/write/flush/fsync` 后 `unlink`，`finally` 里清理），`CRITICAL = ("db", "data_dir")` 任一失败即 503；调度器只作信息项（`off`/`unknown` 永不判失败——多进程部署下本进程没有调度器是正常的）。**没用 `os.access`**：它只查权限位，只读挂载、配额耗尽、inode 用尽照样返回 True。返回体保留旧 `ok`/`status`/`db` 三个键，失败细节只进日志不外泄。用例 `tests/test_health_ready.py`（14 条，含探针失败也不留垃圾文件、数据库不可用时不许把连接串回给调用方）。
+3. ✅ **已修**（变异 4/4 全红）**告警是单通道且互相吞**：`report_alert.py:77-112` 全局单哨兵 + 300s 窗口，`scheduler.py:35-62` 三个运维告警连发时**只有第一条能出去**，后两条连日志都没有；而通道就是被监控的 NapCat 本身——NapCat 一挂，日报与告警**同时全静默**。
+   → 节流键改为 `(kind, title)`，9 个调用点全部补上 `kind`；被抑制的那条**照样写 `logger.warning` 并追加到 `<DATA_DIR>/logs/ops-alerts.jsonl`**（记 `suppressed#N`），"没告警"和"告警被吞"从此能区分；成功发送后计数器归零。本地写失败只记日志，不影响告警本身出去。用例 `tests/test_ops_alert.py`（7 条）。**通道仍是 NapCat 这一点没变**——本地 JSONL 只是让静默留痕，真正的双通道（比如邮件/企业微信）仍是待办。
 4. **`POST /api/v1/records`（64MB 上传）与 bot 回调无限流**（`ratelimit.py` 只被登录使用）——已知取舍，但 bot 路由既然要开，就该接上。
 5. **多进程/多副本会重复推日报**：`wsgi.py:5-6` 在 import 时启动调度器；APScheduler 无分布式锁。当前 compose 单进程跑没事，一旦改成 `--scale` 或 gunicorn 多 worker 就是 N 条重复日报。用 P0-2 的幂等闸门 + `SCHEDULER_OWNER` 环境变量兜住。
 6. **正文长度无上限**（`bot/report.py:46-98`）：伙伴数 × 模板名（200 字符）可轻易过万字符，超 QQ 单条上限即整条推送失败（且因 P0-1 被误报成功）。渲染后硬截断并提示"完整版见后台"。
 7. **`status.py` 每 30s `rglob("*")` 全量遍历 `IMAGES_DIR`**，几万张图时仪表盘明显卡；`_CACHE` 全局 dict 多线程无锁。
+   → 锁已在第 1 项补上；`rglob` 本身仍未优化。
 8. **Token 明文过 HTTP**（`report.py:128-135`，本机 `.env` 实测是 `http://222.222.0.111:13000`）：拿到即可冒充机器人往任何群发消息。至少改内网 HTTPS 或来源 IP 白名单。
 
 ### 客户端
-9. **PS 冷启动重试预算约 6 秒**（`ps_connector.py:68-73,90-126`：3 次循环 + `sleep(2)`），而 `Dispatch` 在 PS 未运行时会静默拉起 PS，冷启 15~40s → **员工第一次点生成必然失败**，还会入库一条 failed 并触发失败告警。`ps_path` 参数（`ps_service.py:47-61`）赋值后**从未使用**，是装饰品。
-10. **单占位符没命中仍然 success**（`ps_service.py:189-203` 只在"全部规则都没命中"时判失败）：模板里 `{{标题}}` 被误删 → 成品图没标题，照样 success 交付。
+9. ✅ **已修**（变异 5/5 全红）**PS 冷启动重试预算约 6 秒**（`ps_connector.py:68-73,90-126`：3 次循环 + `sleep(2)`），而 `Dispatch` 在 PS 未运行时会静默拉起 PS，冷启 15~40s → **员工第一次点生成必然失败**，还会入库一条 failed 并触发失败告警。`ps_path` 参数（`ps_service.py:47-61`）赋值后**从未使用**，是装饰品。
+   → 新增 `core/ps_retry.py`：冷启 60s / 热连 10s 两套预算、指数退避（0.5s 起、上限 2.5s、最多 40 次）、连之前用 `tasklist` 判 PS 是否在跑、冷启时用 `ps_path` **主动拉起**（`ps_path` 从此有用了）。致命错（组件未注册 / PS 已崩溃）不重试，立刻带根因失败——等 60 秒只会折磨员工。顺带修了一个隐藏 bug：**pywin32 给的 HRESULT 是有符号负数**（`-2147023174`），而所有码表都按无符号写（`0x800706BA`），不 `& 0xFFFFFFFF` 就一条都对不上。用例 `tests/test_ps_retry.py`（30 条）+ `tests/test_ps_connector.py`（11 条）。
+10. ✅ **已修**（变异 4/4 全红）**单占位符没命中仍然 success**（`ps_service.py:189-203` 只在"全部规则都没命中"时判失败）：模板里 `{{标题}}` 被误删 → 成品图没标题，照样 success 交付。
+    → 两个表单必填字段对应的替换规则标 `required=True`，未命中即判失败并**点名是哪个占位符**；可选规则仍只做提醒（文案保持原样）。同时把"正则规则无效"从"模板里找不到占位符"里摘出来单独报——否则员工会跑去改模板，而真正错的是配置。流程抽到 `core/ps_rules.py` + `core/ps_replace_flow.py`（`ps_service.py` 因此回到 211 行，守住 300 行闸门）。用例 `tests/test_ps_rules.py` + `tests/test_ps_service.py`。
 11. **单实例开关是 toggle**（`lib.rs:746-753`）：主窗已显示时双击桌面图标 → 窗口被**隐藏**，员工以为没启动。建议第二个实例只 `show + focus`。
 12. **僵尸 sidecar / 端口占用**：`lib.rs:873-885` 只 kill 一级子进程，worker 是孙进程；sidecar 无父进程看门狗；8765 被占时新 sidecar 静默死在 DEVNULL，前端仍连上僵尸 → `busy` 可能永远 true、按钮永远 409。建议 Job Object（`KILL_ON_JOB_CLOSE`）+ 父 PID 看门狗 + 端口失败可见化。
 13. **生成成功后 `saveConfig` 抛异常会把结果翻成"生成失败"**（`useExportTask.ts:119-140` 成功分支与 catch 在同一个 try）：图已生成、记录已上报，员工看到失败必然再点一次 → 撞 409，白跑一轮 PS。
 14. **三个窗口各跑一遍 `startAfterReady`**（`App.vue:107-142`）→ 启动瞬间对同一批 pending 并发 flush；成功记录被 409 兜住，但**失败记录不参与判重**（唯一索引只约束 `status='success'`），会生成 2~3 条重复 failed，污染"失败数"。只让主窗跑 flush/轮询。
-15. **"测试连接"测的是已保存的旧地址**（`AccountTab.vue:22-39` 调 `/status`，后者用 `load_config()` 的磁盘值），toast 却打印表单里的新地址 → 改了地址提示"连接成功"，保存后连不上。
+15. ✅ **已修**（变异 4/4 全红）**"测试连接"测的是已保存的旧地址**（`AccountTab.vue:22-39` 调 `/status`，后者用 `load_config()` 的磁盘值），toast 却打印表单里的新地址 → 改了地址提示"连接成功"，保存后连不上。
+    → 新增 `client/sidecar/conn_test.py` + `POST /config/test`：**用表单里此刻填的地址与 Key** 真发请求。两步探针——先 `/health` 判地址，再打一个需要鉴权的接口判 Key（只看 `/health` 的话，Key 是上一任的也照样 200）。结论分四档 `invalid` / `unreachable` / `key_bad` / `server_error`，前端如实转述；任何异常都不许抛出（按钮不能永远停在"测试中…"）。用例 `tests/test_conn_test.py`（12 条）+ `vue-tsc` 通过。
 16. **PS 无硬超时看门狗**：`executor.py:116-125` 进程活着就一直返回 running，`heartbeat_stale` 只用来显示；`close_document` 失败被 `logger.debug` 吞掉并置 None（`ps_service.py:96-104`）→ PS 里文档越叠越多，最终"暂存盘不足"。
 17. **队列补传时图没了仍建"无图记录"**（`api_client.py:61-75` 只在 `exists()` 时才带 files），UI 还显示"已同步"；`queue` 只存路径字符串不复制文件 → 员工整理过输出目录就永久丢图。
 18. **本机写操作面**：`/open-folder` 接受任意 `path`（`routes_shell.py:26-33`）；`task_id` 未做格式校验就拼路径（`routes_export.py:160` + `worker.py:36-37` 会 `mkdir(parents=True)`）。单机桌面场景危害有限，但一条正则就能堵。
+
+### 本轮新增的一条（不在原报告里）
+
+19. ✅ **已修**（变异 6/6 全红）**内网请求会走系统代理**：`api_client.py` / `conn_test.py` / `diagnostics.py` 全部用模块级 `requests.get`，而 `requests` 默认读 `HTTP_PROXY` / `HTTPS_PROXY`。公司电脑装了 VPN 客户端或 IT 推了系统代理时，发给内网服务器的请求会被送去代理，代理回 **502**——员工侧永远"连接失败"，运维在自己机器上（没配代理）复现不出来。**这条是验证过程中被绊出来的**：本机就设着 `http_proxy`，诊断包的就绪探针返回 `502 upstream connect failed`，而服务好好跑着。
+   → 新增 `client/sidecar/net.py`：对内网的请求统一走 `net.get` / `net.request`，显式带 `proxies={"http": None, "https": None}`（requests 把 `None` 当"这个 scheme 不走代理"，且不会再用环境变量补回来）。默认值而非硬规定：调用方显式给了代理仍以调用方为准。外部 webhook（`bot/report.py`）**有意保留走代理**。`scripts/preflight_check.py` 的就绪探针同样处理——运维笔记本上最可能有代理。用例 `tests/test_net_no_proxy.py`（6 条，含一条"反证"：不传 proxies 时 requests 确实会把环境代理补上）。
 
 ---
 
@@ -172,13 +188,19 @@
 - **NSIS 未签名**：`tauri.conf.json` 的 bundle 没有任何签名配置，员工首次运行会被 SmartScreen 拦成"未知发布者，已阻止"，很多人到这一步就放弃了。内网也建议自签证书 + 域内分发。
 - **金标准图**：每个模板首次使用时用固定假数据生成一张基准图，记录尺寸/DPI/色模/大小区间，之后每次导出都比对（这是把 P0-7 变成可回归的唯一办法）。
 
-### 5.5 一键诊断包
+### 5.5 一键诊断包 ✅ **已完成（2026-10-24）**
 现在只有"复制诊断信息"7 行文本（`AdvancedTab.vue:63-75`）。P0-5 那种"配置全空、界面全 500"的场景，员工没法告诉你任何有用信息。
 → 一键导出 zip：脱敏 config（去掉 api_key）、`sidecar.log`/`worker.log`/近期 `crash-*.log`、最近 5 个 `executions/*/{params,status}.json`、pending/dead 计数、`/health/ready`、PS 版本与系统信息。
+→ **实现**：`client/sidecar/diagnostics.py` + `GET /diagnostics`（给 curl 远程取）+ `POST /diagnostics/save`（存到 `%APPDATA%\psluyong-lite\diagnostics\` 并打开文件夹）。设置 → 高级 →「导出诊断包」。
+　`api_key` 只抹值不抹键（保留 `***已隐藏（原长度 N）***`，能看出"配了但长度不对"）；日志每份只取**尾部 300 行**；最近 **5 次**生成；整包上限 8MB。任一项取不到**只降级不中断**——配置坏了正是最需要出包的时候，所以 `build_bundle` 允许 `client=None`。
+　不用 `<a download>`：Tauri 窗口在部分 Windows 版本上点了没反应，一个静默无效的按钮比没有更糟（见 `routes_shell.py` 注释）。用例 `tests/test_diagnostics.py`（变异 5/5 全红）。
 
-### 5.6 给员工的一页纸（现在没有）
+### 5.6 给员工的一页纸 ✅ **已完成（2026-10-24）**
 `docs/` 只有 DEPLOY（给运维）、AUDIT（给开发）、PLAN_DELTA、design。
 → 员工第一次装完要知道：PS 必须先打开、模板 PSD 放哪里、两处占位符是什么、断网会怎样、卡住了点哪里、出问题找谁（附"复制诊断信息"按钮位置）。**这一页纸能砍掉一半客服量。**
+→ **实现**：[员工手册.md](员工手册.md)，53 行非空、一页纸。结构就是「先开 PS → 四步出图 → 断网会怎样 → 卡住查表 → 导诊断包找谁 → 五件别做的事」。
+　写的时候真踩到两个错：主按钮记成「生成」（实际「生成录用图」）、默认输出目录记成 `D:\期刊录用`（实际是用户「文档」下的 `期刊录用`，`D:` 只是设置页的输入示例）。所以补了 `tests/test_employee_handbook.py`：**手册里指向界面的每一句，都对着真实 Vue 源码校一遍**——按钮名、离线横幅原文、四句阶段文案、90 秒取消阈值、60 秒冷启预算、模板缺失文案、设置页五个分组名、默认目录。顺手也校出 `ps_connector.py` 里一句「再点一次『生成图片』」是同一个错，一起改了。变异 10/10 全红。
+
 
 ### 5.7 数据留存与归档策略
 软删除记录与图片**永久保留**，磁盘只报警不归档（`DISK_ALERT_GB` 默认 20GB，超了只推一次群）。按每天 50 张、每张 3MB 估算，一年 ≈ 55GB。
@@ -206,15 +228,20 @@
 2. **每周抽查一张成品图**：从后台点开原图，和模板比对（金标准校验已经拦掉尺寸错/空白/半截，但"内容对不对"——占位符填对没、图层有没有漏——机器判不了，这仍是唯一人工兜底）。
 3. **变更记录**：这次审计发现的每个 P0 修完要有一条回归用例钉住，否则下次重构会悄悄退回去（本项目已有 3 次"改了代码线上还是旧行为"的先例：废弃索引、静态缓存头、告警哨兵）。
 
+> 2026-10-24 补充：上线检查清单本身也做成了可执行的——`scripts/preflight_check.py`
+> 把 DEPLOY 第四节里机器能判的九项跑一遍，三态输出（通过 / 不通过=退出码 1 / 需人工），
+> 可直接当 CI 或部署前置闸门。**关键是别把「需人工」当「不通过」**：那会让闸门天天响，
+> 人就学会"跑不过也照上"，闸门等于没有。
+
 ---
 
 ## 六、上线节奏建议
 
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
-| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（604 全绿，前端 39 例 + vue-tsc 通过） | 每条 P0 有回归用例且做过变异验证 |
+| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（780 全绿，前端 39 例 + vue-tsc 通过） | 每条 P0 有回归用例且做过变异验证 |
 | **第 2 周** | 打第一版带版本号的安装包；3 人灰度（含 1 台老机器/1 个非 RGB 模板） | 灰度 5 个工作日：0 丢图、0 无记录、日报每日到达 |
-| **第 3 周** | 修 P1 服务端项 + 客户端 9/12/13/14；补员工手册、诊断包 | 灰度反馈清零 |
+| **第 3 周** | P1 服务端 1/2/3 + 客户端 9/10/15 ✅ 已完成；员工手册、诊断包、预检脚本 ✅ 已完成（2026-10-24 第二批） | 灰度反馈清零 |
 | **第 4 周** | 全量分发（签名安装包 + 自动更新通道）；上线监控与备份演练 | 上线检查清单（DEPLOY 第四节）全打勾 + 演练记录归档 |
 
 **不建议**跳过灰度直接全量：P0-5 与 P0-6 的表现都是"客户端看着正常、数据没了"，全量后才发现就要挨台排查。

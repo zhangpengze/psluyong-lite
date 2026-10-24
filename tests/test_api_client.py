@@ -211,12 +211,12 @@ def test_submit_record_failure_still_closes_handle(api, monkeypatch, tmp_path):
 # ---------- 健康检查 ----------
 
 def test_health_true_when_server_answers(api, monkeypatch):
-    monkeypatch.setattr(api_mod.requests, "get", lambda url, timeout: _Resp())
+    monkeypatch.setattr(api_mod.requests, "get", lambda url, timeout, **kwargs: _Resp())
     assert api.health() is True
 
 
 def test_health_false_on_any_request_exception(api, monkeypatch):
-    def boom(url, timeout):
+    def boom(url, timeout, **kwargs):
         raise requests.ConnectionError("refused")
 
     monkeypatch.setattr(api_mod.requests, "get", boom)
@@ -254,7 +254,7 @@ def test_list_records_omits_blank_filters(api, monkeypatch):
 def test_fetch_image_sends_api_key_and_thumb_flag(api, monkeypatch):
     seen = {}
 
-    def fake_get(url, headers=None, params=None, timeout=None):
+    def fake_get(url, headers=None, params=None, timeout=None, **kwargs):
         seen.update(url=url, headers=headers, params=params, timeout=timeout)
         return _Resp(status_code=200, content=b"JPEGDATA")
 
@@ -270,7 +270,7 @@ def test_fetch_image_sends_api_key_and_thumb_flag(api, monkeypatch):
 def test_fetch_image_full_size_drops_thumb_param(api, monkeypatch):
     seen = {}
 
-    def fake_get(url, headers=None, params=None, timeout=None):
+    def fake_get(url, headers=None, params=None, timeout=None, **kwargs):
         seen["params"] = params
         return _Resp(status_code=200, content=b"b")
 
@@ -285,7 +285,7 @@ def test_fetch_image_missing_record_raises_with_status(api, monkeypatch):
     monkeypatch.setattr(
         api_mod.requests,
         "get",
-        lambda url, headers=None, params=None, timeout=None: _Resp(status_code=404),
+        lambda url, headers=None, params=None, timeout=None, **kwargs: _Resp(status_code=404),
     )
 
     with pytest.raises(ServerError) as info:
@@ -296,7 +296,7 @@ def test_fetch_image_missing_record_raises_with_status(api, monkeypatch):
 
 
 def test_fetch_image_network_failure_is_translated(api, monkeypatch):
-    def boom(url, headers=None, params=None, timeout=None):
+    def boom(url, headers=None, params=None, timeout=None, **kwargs):
         raise requests.ConnectionError("gone")
 
     monkeypatch.setattr(api_mod.requests, "get", boom)
@@ -305,3 +305,38 @@ def test_fetch_image_network_failure_is_translated(api, monkeypatch):
         api.fetch_image(1)
 
     assert "取图失败" in info.value.message
+
+
+# ---------- 系统代理 ----------
+
+def test_record_upload_bypasses_system_proxy(api, monkeypatch, tmp_path):
+    """上报记录这条最不能出事：公司电脑上配了 HTTP_PROXY 时，
+    请求若被送去代理，代理回 502，这条成品就永远传不上去——
+    而运维在自己机器上（没配代理）复现不出来。"""
+    calls = _stub_request(monkeypatch, resp=_Resp(payload={"ok": True, "data": {}}))
+    api.submit_record({"author": "李四"}, None)
+    assert calls[0]["proxies"] == {"http": None, "https": None}
+
+
+def test_fetch_image_bypasses_system_proxy(api, monkeypatch):
+    seen = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None, **kwargs):
+        seen.update(kwargs)
+        return _Resp()
+
+    monkeypatch.setattr(api_mod.requests, "get", fake_get)
+    api.fetch_image(1)
+    assert seen["proxies"] == {"http": None, "https": None}
+
+
+def test_health_bypasses_system_proxy(api, monkeypatch):
+    seen = {}
+
+    def fake_get(url, timeout=None, **kwargs):
+        seen.update(kwargs)
+        return _Resp()
+
+    monkeypatch.setattr(api_mod.requests, "get", fake_get)
+    api.health()
+    assert seen["proxies"] == {"http": None, "https": None}

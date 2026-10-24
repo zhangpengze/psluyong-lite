@@ -42,7 +42,7 @@ def nightly_job() -> None:
         create_backup(db_file_path(), BACKUP_DIR, Config.BACKUP_KEEP)
     except Exception as e:  # noqa: BLE001
         logger.exception("定时备份执行失败")
-        push_ops_alert("数据库备份失败", f"{type(e).__name__}: {e}")
+        push_ops_alert("数据库备份失败", f"{type(e).__name__}: {e}", kind="backup")
 
     # 2) 成品图增量镜像（未配置则跳过，启动时已 warning 过一次）
     if Config.IMAGES_MIRROR_DIR:
@@ -52,10 +52,11 @@ def nightly_job() -> None:
                 push_ops_alert(
                     "图片镜像有文件失败",
                     f"失败 {result['failed']} 个｜目标 {Config.IMAGES_MIRROR_DIR}",
+                    kind="mirror",
                 )
         except Exception as e:  # noqa: BLE001
             logger.exception("图片镜像失败")
-            push_ops_alert("图片镜像失败", f"{type(e).__name__}: {e}")
+            push_ops_alert("图片镜像失败", f"{type(e).__name__}: {e}", kind="mirror")
 
     # 3) 磁盘占用阈值
     try:
@@ -65,6 +66,7 @@ def nightly_job() -> None:
                 "成品图占用已超阈值",
                 f"当前 {used_gb:.1f} GB ≥ 阈值 {Config.DISK_ALERT_GB:.0f}｜"
                 "建议归档旧月份或扩容",
+                kind="disk",
             )
     except Exception:  # noqa: BLE001
         logger.exception("磁盘占用检查失败")
@@ -89,10 +91,14 @@ def start_scheduler(app) -> None:
             logger.info("定时日报完成: %s", result["message"])
             # 配了机器人却推送失败，必须让人知道——徽标在后台页里，没人会天天点开看
             if Config.NAPCAT_WEBHOOK and not result["pushed"]:
-                push_ops_alert("定时日报未推送成功", f"日期 {result['date']}｜{result['message']}")
+                push_ops_alert(
+                    "定时日报未推送成功",
+                    f"日期 {result['date']}｜{result['message']}",
+                    kind="report",
+                )
         except Exception as e:  # noqa: BLE001 - 定时任务不能因单次异常退出
             logger.exception("定时日报执行失败")
-            push_ops_alert("定时日报生成异常", f"{type(e).__name__}: {e}"[:200])
+            push_ops_alert("定时日报生成异常", f"{type(e).__name__}: {e}"[:200], kind="report")
 
     def patrol_job() -> None:
         """次日巡检：补昨天的终版（内容没变就不发），并报更早的缺口。
@@ -103,11 +109,13 @@ def start_scheduler(app) -> None:
             result = patrol(app)
             if Config.NAPCAT_WEBHOOK and not result["pushed"] and not result["skipped"]:
                 push_ops_alert(
-                    "日报终版补推失败", f"日期 {result['date']}｜{result['message']}"
+                    "日报终版补推失败",
+                    f"日期 {result['date']}｜{result['message']}",
+                    kind="patrol",
                 )
         except Exception as e:  # noqa: BLE001
             logger.exception("日报巡检执行失败")
-            push_ops_alert("日报巡检异常", f"{type(e).__name__}: {e}"[:200])
+            push_ops_alert("日报巡检异常", f"{type(e).__name__}: {e}"[:200], kind="patrol")
 
     _scheduler = BackgroundScheduler(timezone=Config.TZ)
     _scheduler.add_job(
@@ -159,3 +167,24 @@ def stop_scheduler() -> None:
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+
+
+def scheduler_status() -> dict:
+    """给 /health/ready 用的存活信息：在跑没有、几个 job、下次触发时刻。
+
+    只读，不改任何状态。取不到 job 列表时不抛——探针不该因为 APScheduler
+    内部一时抽风就把整个服务判成未就绪，那会把问题放大成"全部不可用"。
+    """
+    if _scheduler is None:
+        return {"running": False, "jobs": 0, "next_run": None}
+    try:
+        jobs = _scheduler.get_jobs() or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取调度器 job 列表失败: %s", e)
+        return {"running": bool(getattr(_scheduler, "running", False)), "jobs": 0, "next_run": None}
+    upcoming = [j.next_run_time for j in jobs if getattr(j, "next_run_time", None)]
+    return {
+        "running": bool(getattr(_scheduler, "running", False)),
+        "jobs": len(jobs),
+        "next_run": min(upcoming).strftime("%m-%d %H:%M") if upcoming else None,
+    }

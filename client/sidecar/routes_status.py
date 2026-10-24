@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request
 
 from core.ps_connector import COM_AVAILABLE  # noqa: E402
 
-from . import __version__, queue, settler
+from . import __version__, conn_test, queue, settler
 from .config import (
     ConfigBusyError,
     last_recovery,
@@ -123,3 +123,18 @@ def register_status_routes(app: Flask, executor, _client) -> None:
             return jsonify({"ok": False, "error": str(e)}), 503
         logger.info("配置已保存 employee=%s server=%s", cfg.employee_name, cfg.server_url)
         return jsonify({"ok": True, "config": cfg.to_dict()})
+
+    @app.post("/config/test")
+    def test_config():
+        """测**表单里此刻填的**地址和 Key，不读磁盘、不落盘。
+
+        以前这个按钮打的是 /status（读磁盘旧配置），toast 却打印表单里的新地址：
+        改了地址提示"连接成功"，保存后连不上。测的是哪一份配置，必须就是
+        员工眼前这一份。
+        """
+        payload = request.get_json(silent=True) or {}
+        result = conn_test.probe(
+            str(payload.get("server_url") or ""), str(payload.get("api_key") or "")
+        )
+        logger.info("测试连接：%s（%s）", result["level"], result["message"])
+        return jsonify({"ok": True, "result": result})

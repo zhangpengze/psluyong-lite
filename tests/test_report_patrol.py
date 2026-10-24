@@ -48,7 +48,7 @@ def sent(monkeypatch):
 def ops_alerts(monkeypatch):
     captured: list[tuple[str, str]] = []
 
-    def fake_alert(title: str, detail: str = ""):
+    def fake_alert(title: str, detail: str = "", kind: str = "ops"):
         captured.append((title, detail))
         return True, "已捕获"
 

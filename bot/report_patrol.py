@@ -79,6 +79,7 @@ def patrol(app, today: date | None = None) -> dict:
             "日期："
             + "、".join(missing)
             + "｜到后台「每日日报」选中该日期点「重推此日报」即可补推",
+            kind="patrol",
         )
         logger.warning("日报缺口 %d 天：%s", len(missing), "、".join(missing))
 

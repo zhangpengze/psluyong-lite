@@ -472,28 +472,75 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 
 ## 四、上线检查清单
 
-- [ ] `.env` 里三个密钥都不是示例值
+**先跑脚本，再勾这个清单。** 下面这份是给"人"看的版本；其中凡是机器能判的，都做成了
+`scripts/preflight_check.py`，有 FAIL 就是退出码 1，可以直接挂在 CI 或部署前置闸门上：
+
+```bash
+.venv/Scripts/python.exe scripts/preflight_check.py                              # 表格
+.venv/Scripts/python.exe scripts/preflight_check.py --base-url http://NAS:8080    # 顺带探就绪探针
+.venv/Scripts/python.exe scripts/preflight_check.py --json | jq '.failed'         # 给 CI
+```
+
+三态，含义别混：
+
+| 结果 | 含义 | 怎么办 |
+|---|---|---|
+| `通过` | 机器验过，确实如此 | — |
+| `不通过` | 机器验过，确实不行；**退出码 1** | 按 `→` 后面的提示修，别绕过 |
+| `需人工` | 机器判不了（要么服务没起，要么本来就靠人看） | 就是下面清单里剩下的那些，逐个勾 |
+
+> 把 `需人工` 当 `不通过` 会让闸门天天响，人就学会"跑不过也照上"——那闸门就白做了。
+> 反过来，把 `不通过` 当 `需人工` 放过去，就等于没这道闸门。
+
+脚本判不了、必须人看的：
+
 - [ ] 镜像加速已配（Docker → 镜像 → 设置 → 加速器配置）
 - [ ] 【Docker】→【容器】里 psluyong-lite 状态为「运行中」
 - [ ] 已用管理员登录，改掉默认密码
-- [ ] `docker exec psluyong-lite python -m server.backup --list` 能列出备份
 - [ ] 至少上传 1 个模板，并在客户端成功出过 1 张图
 - [ ] **生成完立刻关掉客户端再重开**，后台仍能查到那条记录（验的是"关窗也补报"这条路）
 - [ ] 用本机真实模板出过 1 张图，输出目录里**只有** `作者_标题.jpg`（不该有 `.psluyong-tmp` 或 `.校验未通过`）
 - [ ] 员工机器的 PS 版本已确认（不同版本 COM 行为略有差异）
 - [ ] `server/data` 已纳入 NAS 定时备份
-- [ ] **图片有第二份**：`IMAGES_MIRROR_DIR` 已配（或在存储空间开了快照）
 - [ ] 容器日志已限流（compose 里的 `logging` 段），`docker logs` 不会无限长
 - [ ] 运维告警能收到：手动删掉一个备份文件后跑一次 `python -m server.backup` 验证
-- [ ] `PRAGMA journal_mode` 输出为 `wal`（data 目录在网络盘上时改为 `DELETE`）
 - [ ] 后台「操作日志」页能看到本次登录记录
 - [ ] `ENABLE_SCHEDULER=1`，且「每日日报」页能看到当天日报
 - [ ] NapCat 已部署，HTTP 服务端 Token 已填进 `NAPCAT_TOKEN`
 - [ ] 后台点「重推此日报」，QQ 群收到且徽标变「已推送」
 - [ ] 配了群内指令：NapCat 上报地址指向 `/api/v1/bot/onebot`，群里发「汇总」私聊能收到
-- [ ] 检查 `/health/ready` 返回 200
 - [ ] 上线前已记录本次镜像 tag：`docker images psluyong-lite`（回滚要用，见第五节）
 - [ ] **每月一次恢复演练**：`docker exec psluyong-lite python -m server.backup --restore <最近一份备份文件> --rehearse` 输出「彩排通过」且打印各表行数——只校验不落盘，练的是"备份真的能恢复"（步骤见第五节 5.3）
+- [ ] **员工手册已发到每个人手上**（[员工手册.md](员工手册.md)），并确认他们知道「设置 → 高级 → 导出诊断包」在哪
+
+### 4.1 员工报障：先要诊断包
+
+员工说"传不上去 / 出不了图"时，第一句就要求他导诊断包，不要隔空问日志：
+
+> 设置（右上齿轮）→ **高级** → **「导出诊断包」**
+
+sidecar 会打一个 zip 存到 `%APPDATA%\psluyong-lite\diagnostics\` 并打开所在文件夹。里面有：
+
+| 文件 | 内容 |
+|---|---|
+| `README.txt` | 这个包怎么读、里面有什么、哪些字段已脱敏 |
+| `meta.json` | 客户端版本、机器名、导出时间、路径、Python/PS 版本 |
+| `config.sanitized.json` | 完整配置，**`api_key` 已替换成 `***已隐藏（原长度 N）***`** |
+| `server_health.json` | 服务端 `/health/ready` 的原始返回；探不到时记 `error` 而不是抛异常 |
+| `logs/*.log` | 运行时日志（每份只取**尾部 300 行**） |
+| `logs/crash-*.txt` | 最近 3 份崩溃转储 |
+| `executions/*` | 最近 **5 次**生成的 `params` / `status` / `result` |
+
+任一项取不到都只降级、不中断出包（配置坏了也要能出包，那正是最需要它的时候）。
+整个包上限 8MB。**可以直接让员工发群里**——密钥已经抹掉了。
+
+几个常见读法：
+
+- `server_health.json` 里是 `"status_code": 502` 加一段英文 `raw` → 是**代理**回的，不是服务端。看 `client/sidecar/net.py` 的注释，内网请求已强制绕开环境代理；若仍出现，查那台机器上是否有人改回了裸 `requests`
+- `config.sanitized.json` 里 `server_url` 指向一个已经不存在的 IP → 换服务器后没同步
+- `executions/` 里最后一条 `result.json` 是 `failed` 且 `error` 提到占位符 → 模板被人改过，不是客户端问题
+
+脚本判不了的还有一条：`需人工` 里的「就绪探针」如果不加 `--base-url` 会一直是 `需人工`——那是故意的，脚本不替服务端的健康负责。
 
 ---
 

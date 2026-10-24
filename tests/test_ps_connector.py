@@ -121,7 +121,18 @@ def test_import_without_pywin32_does_not_crash_and_degrades():
 
 # ========== connect ==========
 
-def test_connect_success_initializes_com_and_marks_visible(monkeypatch, no_sleep):
+@pytest.fixture()
+def warm_ps(monkeypatch):
+    """默认钉死"PS 已经在跑"：connect 的预算与预启动都不去碰真实系统。
+
+    单独一个 fixture（而不是 autouse）是为了让"冷启动"用例能明确地反过来打桩，
+    读代码的人一眼能看出这条用例考的是哪一支。
+    """
+    monkeypatch.setattr(m.ps_retry, "is_photoshop_running", lambda *_a, **_kw: True)
+    monkeypatch.setattr(m.ps_retry, "prelaunch", lambda *_a, **_kw: True)
+
+
+def test_connect_success_initializes_com_and_marks_visible(monkeypatch, no_sleep, warm_ps):
     coinit: list[int] = []
     app = FakeApp(visible=False)
     monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: coinit.append(1)))
@@ -135,7 +146,7 @@ def test_connect_success_initializes_com_and_marks_visible(monkeypatch, no_sleep
     assert app.Visible is True, "后台拉起的 PS 必须置为可见，否则员工看不到卡在哪"
 
 
-def test_connect_coinitialize_failure_is_swallowed(monkeypatch, no_sleep):
+def test_connect_coinitialize_failure_is_swallowed(monkeypatch, no_sleep, warm_ps):
     def boom():
         raise RuntimeError("already initialized?")
 
@@ -148,7 +159,7 @@ def test_connect_coinitialize_failure_is_swallowed(monkeypatch, no_sleep):
     assert conn.app is app
 
 
-def test_connect_visible_read_error_does_not_block(monkeypatch, no_sleep):
+def test_connect_visible_read_error_does_not_block(monkeypatch, no_sleep, warm_ps):
     class AppBadVisible:
         @property
         def Visible(self):
@@ -163,42 +174,85 @@ def test_connect_visible_read_error_does_not_block(monkeypatch, no_sleep):
     assert conn.app is app
 
 
-def test_connect_retries_three_times_then_friendly_error(monkeypatch, no_sleep):
+# ---------- 冷启动预算：这一节的每一条都对应"第一次点生成必然失败" ----------
+
+def test_cold_start_budget_covers_real_photoshop_launch():
+    """实测冷启 15~40 秒；旧实现总共约 6 秒，等于第一次生成必然失败。"""
+    assert m.ps_retry.budget_for(True) >= 45, "冷启动预算必须覆盖 40 秒实测上限"
+    assert m.ps_retry.budget_for(True) > m.ps_retry.budget_for(False), "冷/热预算必须分档"
+    assert m.ps_retry.budget_for(False) >= 5, "已运行也不该只等一两秒"
+
+
+def test_connect_prelaunches_configured_photoshop_when_not_running(monkeypatch, no_sleep):
+    """ps_path 以前赋值后从未使用。现在 PS 没跑时先按这个路径把进程拉起来。"""
+    launched: list[str] = []
+    monkeypatch.setattr(m.ps_retry, "is_photoshop_running", lambda *_a, **_kw: False)
+    monkeypatch.setattr(m.ps_retry, "prelaunch", lambda exe: launched.append(exe) or True)
+    app = FakeApp()
+    monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(m, "win32com", _fake_win32com(lambda progid: app))
+
+    PSConnector().connect("C:/Program Files/Adobe/Photoshop.exe")
+
+    assert launched == ["C:/Program Files/Adobe/Photoshop.exe"]
+
+
+def test_connect_does_not_prelaunch_when_already_running(monkeypatch, no_sleep):
+    launched: list[str] = []
+    monkeypatch.setattr(m.ps_retry, "is_photoshop_running", lambda *_a, **_kw: True)
+    monkeypatch.setattr(m.ps_retry, "prelaunch", lambda exe: launched.append(exe) or True)
+    monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(m, "win32com", _fake_win32com(lambda progid: FakeApp()))
+
+    PSConnector().connect("C:/PS/Photoshop.exe")
+    assert launched == [], "已经在跑就别再拉一个进程"
+
+
+def test_connect_keeps_retrying_startup_error_until_budget(monkeypatch, no_sleep, warm_ps):
+    """可重试错误不再只有 3 次机会：按截止时刻退避，直到预算用尽。"""
     attempts: list[int] = []
 
     def failing_dispatch(progid):
         attempts.append(1)
-        raise ValueError("dispatch failed")
+        raise _com_error(-2146959355)  # CO_E_SERVER_EXEC_FAILURE：PS 正在启动
 
-    # 打桩错误处理器：模拟"可重试"的错误，验证 3 次重试后给员工的最终指引
-    monkeypatch.setattr(PSConnector, "_handle_com_error", lambda self, exc, a, n: None)
     monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
     monkeypatch.setattr(m, "win32com", _fake_win32com(failing_dispatch))
 
     conn = PSConnector()
     with pytest.raises(RuntimeError) as ei:
         conn.connect("")
-    assert len(attempts) == 3, "必须重试满 3 次"
-    msg = str(ei.value)
-    assert "已重试 3 次" in msg
-    assert "管理员身份" in msg, "最终报错必须给员工可执行的下一步"
-    assert no_sleep == [1, 1, 1], "每次重试之间要等 1 秒（含最后一次尝试后）"
+
+    assert len(attempts) > 3, "3 次机会不够冷启动用"
+    assert len(attempts) <= m.ps_retry.MAX_ATTEMPTS
+    # 退避递增且有上限：不能 40 次全等 0.5 秒（那等于没退避）
+    assert no_sleep[0] == pytest.approx(0.5)
+    assert no_sleep[-1] == pytest.approx(m.ps_retry._MAX_DELAY_S)
+    assert all(d <= m.ps_retry._MAX_DELAY_S for d in no_sleep)
+    assert "管理员身份" in str(ei.value), "最终报错必须给员工可执行的下一步"
 
 
-def test_connect_generic_error_propagates_immediately(monkeypatch, no_sleep):
-    """真实错误处理器对非 COM 错误原样上抛——不吞不改，调用方能看到根因"""
+def test_cold_start_failure_tells_employee_to_wait_for_ps(monkeypatch, no_sleep):
+    """冷启失败最可能的下一步是"等 PS 出来再点一次"，不是"重装" """
+    monkeypatch.setattr(m.ps_retry, "is_photoshop_running", lambda *_a, **_kw: False)
+    monkeypatch.setattr(m.ps_retry, "prelaunch", lambda *_a, **_kw: True)
+    monkeypatch.setattr(m.ps_retry, "MAX_ATTEMPTS", 2)
     monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
-    monkeypatch.setattr(m, "win32com", _fake_win32com(lambda progid: (_ for _ in ()).throw(ValueError("boom"))))
+    monkeypatch.setattr(
+        m,
+        "win32com",
+        _fake_win32com(lambda progid: (_ for _ in ()).throw(_com_error(-2146959355))),
+    )
 
-    conn = PSConnector()
-    with pytest.raises(ValueError, match="boom"):
-        conn.connect("")
-    assert no_sleep == [], "非 COM 错误不该走重试等待"
+    with pytest.raises(RuntimeError) as ei:
+        PSConnector().connect("")
+    msg = str(ei.value)
+    assert "60 秒内启动完成" in msg and "工具栏" in msg
+    assert "重装" in msg, "兜底指引仍要保留，但不能只有它"
 
 
-def test_connect_runtime_error_from_handler_propagates(monkeypatch, no_sleep):
-    """handler 判定为业务语义错误（如组件未注册）时必须直接上抛，
-    不许被重试循环吞成「连接失败」泛化文案"""
+def test_connect_fatal_code_fails_fast_without_waiting(monkeypatch, no_sleep, warm_ps):
+    """组件未注册再等 60 秒只是折磨员工——必须立刻带根因失败。"""
     monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
     monkeypatch.setattr(
         m,
@@ -206,57 +260,51 @@ def test_connect_runtime_error_from_handler_propagates(monkeypatch, no_sleep):
         _fake_win32com(lambda progid: (_ for _ in ()).throw(_com_error(-2147221164))),
     )
 
-    conn = PSConnector()
     with pytest.raises(RuntimeError) as ei:
-        conn.connect("")
+        PSConnector().connect("")
     assert "COM 组件未注册" in str(ei.value)
+    assert no_sleep == [], "致命错误不许走重试等待"
 
 
-# ========== _handle_com_error 错误码分流 ==========
+def test_connect_connection_lost_is_actionable(monkeypatch, no_sleep, warm_ps):
+    monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(
+        m,
+        "win32com",
+        _fake_win32com(lambda progid: (_ for _ in ()).throw(_com_error(-2147023174))),
+    )
 
-def test_unregistered_com_component_message():
-    conn = PSConnector()
     with pytest.raises(RuntimeError) as ei:
-        conn._handle_com_error(_com_error(-2147221164), attempt=0, max_retries=3)
-    assert "COM 组件未注册" in str(ei.value)
+        PSConnector().connect("")
+    assert "连接已断开" in str(ei.value) and "重新打开" in str(ei.value)
 
 
-def test_startup_error_retries_then_gives_up(no_sleep):
-    conn = PSConnector()
-    # 前两次：等待重试（返回而不是抛）
-    assert conn._handle_com_error(_com_error(-2146959355), attempt=0, max_retries=3) is None
-    assert conn._handle_com_error(_com_error(-2146959355), attempt=1, max_retries=3) is None
-    assert no_sleep == [2, 2], "PS 启动等待间隔 2 秒"
-    # 最后一次：放弃并给员工明确指引
-    with pytest.raises(RuntimeError) as ei:
-        conn._handle_com_error(_com_error(-2146959355), attempt=2, max_retries=3)
-    assert "无法启动 Photoshop，请手动启动" in str(ei.value)
+def test_connect_generic_error_propagates_immediately(monkeypatch, no_sleep, warm_ps):
+    """非 COM 错误原样上抛——把 ValueError 当"PS 在启动"重试 60 秒只会藏 bug"""
+    monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(
+        m, "win32com", _fake_win32com(lambda progid: (_ for _ in ()).throw(ValueError("boom")))
+    )
+
+    with pytest.raises(ValueError, match="boom"):
+        PSConnector().connect("")
+    assert no_sleep == [], "非 COM 错误不该走重试等待"
 
 
-def test_connection_lost_error_message():
-    conn = PSConnector()
-    with pytest.raises(RuntimeError) as ei:
-        conn._handle_com_error(_com_error(-2147023174), attempt=0, max_retries=3)
-    assert "连接已断开" in str(ei.value)
-
-
-def test_non_com_error_reraised_as_is():
-    conn = PSConnector()
-    err = ValueError("not com")
-    with pytest.raises(ValueError, match="not com"):
-        conn._handle_com_error(err, attempt=0, max_retries=3)
-
-
-def test_error_with_no_hresult_and_no_excepinfo_does_not_typeerror():
+def test_connect_error_with_no_hresult_does_not_typeerror(monkeypatch, no_sleep, warm_ps):
     """回归：hresult=0 且 excepinfo=None 曾让 None[0] 抛 TypeError 从
     重试逻辑里漏出——必须原样抛 com_error，而不是 TypeError。"""
-    conn = PSConnector()
+    monkeypatch.setattr(m, "pythoncom", SimpleNamespace(CoInitialize=lambda: None))
+    monkeypatch.setattr(
+        m,
+        "win32com",
+        _fake_win32com(
+            lambda progid: (_ for _ in ()).throw(pywintypes.com_error(0, "no excepinfo", None, None))
+        ),
+    )
+
     with pytest.raises(pywintypes.com_error):
-        conn._handle_com_error(_com_error_with_none_excepinfo(), attempt=0, max_retries=3)
-
-
-def _com_error_with_none_excepinfo() -> pywintypes.com_error:
-    return pywintypes.com_error(0, "no excepinfo", None, None)
+        PSConnector().connect("")
 
 
 # ========== open / dialogs / close ==========

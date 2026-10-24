@@ -58,7 +58,7 @@ def ops_alerts(monkeypatch):
     """捕获 push_ops_alert——调度器两条链路唯一的推送出口"""
     captured: list[tuple[str, str]] = []
 
-    def fake_alert(title: str, detail: str = ""):
+    def fake_alert(title: str, detail: str = "", kind: str = "ops"):
         captured.append((title, detail))
         return True, "已捕获"
 

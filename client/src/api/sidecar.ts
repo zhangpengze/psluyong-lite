@@ -3,103 +3,36 @@
  *
  * sidecar 只绑 127.0.0.1:8765，前端所有动作都走这里，
  * 好处是错误提示能统一成员工看得懂的中文。
+ *
+ * 类型定义在 ./types（这个文件只放"怎么调"，不放"长什么样"），
+ * 这里再导出一次，调用方继续 `from '../api/sidecar'` 就行。
  */
 
+import type {
+  ClientConfig,
+  ConnectionTestResult,
+  ExportResult,
+  ExportStatusRunning,
+  HistoryItem,
+  HistoryRange,
+  PsInfo,
+  TemplateItem,
+} from './types'
+
+export type {
+  ClientConfig,
+  ConnectionTestResult,
+  ExportFail,
+  ExportOk,
+  ExportResult,
+  ExportStatusRunning,
+  HistoryItem,
+  HistoryRange,
+  PsInfo,
+  TemplateItem,
+} from './types'
+
 const BASE = 'http://127.0.0.1:8765'
-
-export interface ClientConfig {
-  server_url: string
-  api_key: string
-  employee_name: string
-  ps_path: string
-  output_dir: string
-  jpg_quality: number
-  auto_clear: boolean
-  last_template_id: string
-  last_partner: string
-  last_author: string
-  partners: string[]
-  template_dir: string
-  author_placeholder: string
-  title_placeholder: string
-  /** 成品图命名：author=作者.jpg / author_title=作者_标题.jpg */
-  filename_rule: string
-  always_on_top: boolean
-  /** 贴边方向：left / right / top / 空（不贴边） */
-  dock_side: string
-  /** 拖到屏幕边缘 24px 内松手自动贴边 */
-  auto_dock: boolean
-  /** 关闭主窗 = 隐藏到托盘（关掉则关闭即退出） */
-  close_to_tray: boolean
-  /** 主窗上次位置（-1 表示未记录） */
-  win_x: number
-  win_y: number
-  /** 记录窗 / 设置窗各自的位置记忆 */
-  history_win_x: number
-  history_win_y: number
-  settings_win_x: number
-  settings_win_y: number
-  theme: string
-}
-
-export interface TemplateItem {
-  id: string
-  name: string
-  filename: string
-  size: number
-}
-
-export interface ExportOk {
-  ok: true
-  image_path: string
-  image_name: string
-  warnings: string[]
-  duration_ms: number
-  uploaded: boolean
-  queued: boolean
-  upload_message: string
-  record_id: number | null
-}
-
-export interface ExportFail {
-  ok: false
-  error: string
-  warnings?: string[]
-  /** 员工自己点的取消：不是失败，不该计入失败率，也不必"重新填写" */
-  cancelled?: boolean
-  /** PS 崩溃导致结果未知，需要人去输出目录确认 */
-  uncertain?: boolean
-}
-
-export type ExportResult = ExportOk | ExportFail
-
-export interface ExportStatusRunning {
-  ok: true
-  state: 'running'
-  finished: false
-  elapsed_s: number
-  heartbeat_stale: boolean
-}
-
-export interface HistoryItem {
-  id: number
-  work_date: string
-  template_name: string
-  partner_name: string
-  author: string
-  title: string
-  status: string
-  has_image: boolean
-  created_at: string
-  error_message?: string
-  processing_ms?: number
-  client_machine?: string
-  ps_version?: string
-  image_filename?: string
-}
-
-/** 时间区间：today/7/30/all 是快捷档，custom 由外部给起止日期 */
-export type HistoryRange = 'today' | '7' | '30' | 'all' | 'custom'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response
@@ -120,18 +53,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`本地服务返回异常（HTTP ${resp.status}）`)
   }
   return data as T
-}
-
-/** 本机 Photoshop 的识别结果（sidecar 自动探测，任意版本/任意盘符） */
-export interface PsInfo {
-  path: string
-  version: string
-  /** config=手动指定 / app-paths=注册表 / uninstall=安装信息 / scan=目录扫描 / none=未识别 */
-  source: string
-  source_label: string
-  found: boolean
-  /** 手填的路径已失效：生成用自动识别的顶替，界面要提醒一句 */
-  override_missing: boolean
 }
 
 export const api = {
@@ -163,6 +84,16 @@ export const api = {
   detectPs: () => request<{ ok: boolean; ps: PsInfo }>('/ps/detect', { method: 'POST' }),
 
   getConfig: () => request<{ ok: boolean; config: ClientConfig }>('/config'),
+
+  /**
+   * 用表单里此刻填的地址与 Key 测一次连接（不读磁盘、不保存）。
+   * level 区分了"地址不通"和"Key 不对"，界面必须如实转述。
+   */
+  testConfig: (serverUrl: string, apiKey: string) =>
+    request<{ ok: boolean; result: ConnectionTestResult }>('/config/test', {
+      method: 'POST',
+      body: JSON.stringify({ server_url: serverUrl, api_key: apiKey }),
+    }),
 
   saveConfig: (patch: Partial<ClientConfig>) =>
     request<{ ok: boolean; config: ClientConfig; error?: string }>('/config', {
@@ -268,6 +199,15 @@ export const api = {
 
   openFolder: (path: string) =>
     request<{ ok: boolean }>(`/open-folder?path=${encodeURIComponent(path)}`, { method: 'POST' }),
+
+  /**
+   * 一键诊断包：sidecar 生成 zip 存到本机固定目录并打开。
+   * 不用 <a download>，因为 Tauri 窗口在部分 Windows 版本上点了没反应。
+   */
+  saveDiagnostics: () =>
+    request<{ ok: boolean; path?: string; dir?: string; error?: string }>('/diagnostics/save', {
+      method: 'POST',
+    }),
 
   openLogs: () =>
     request<{ ok: boolean; path?: string; error?: string }>('/logs/open', { method: 'POST' }),

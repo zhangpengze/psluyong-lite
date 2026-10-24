@@ -82,6 +82,24 @@ async function openLogs() {
     flash(e instanceof Error ? e.message : '打开日志目录失败', 'error')
   }
 }
+
+/**
+ * 导出诊断包：把日志、配置（已抹掉 Key）、最近几次生成的现场打成一个 zip。
+ * 「复制诊断信息」只有 7 行，遇到"配置全空/界面全 500"时员工给不出任何有用东西。
+ */
+const diagBusy = ref(false)
+async function saveDiagBundle() {
+  diagBusy.value = true
+  try {
+    const res = await api.saveDiagnostics()
+    if (res.ok) flash('诊断包已导出到 diagnostics 文件夹，请把它发给主管', 'success')
+    else flash(res.error || '生成诊断包失败', 'error')
+  } catch (e) {
+    flash(e instanceof Error ? e.message : '生成诊断包失败', 'error')
+  } finally {
+    diagBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -151,6 +169,7 @@ async function openLogs() {
     <span class="diag-ver">客户端 v{{ appVersion }} · 本地服务 v{{ diag?.version ?? '—' }}</span>
     <span class="spacer" />
     <a class="link" @click="copyDiag">复制诊断信息</a>
+    <a class="link" @click="diagBusy ? undefined : saveDiagBundle">{{ diagBusy ? '正在打包…' : '导出诊断包' }}</a>
     <a class="link" @click="openLogs">打开日志</a>
   </div>
 </template>

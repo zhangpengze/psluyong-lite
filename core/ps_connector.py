@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import List
 
+from . import ps_retry
 from .ps_doc_ops import apply_document_replacements
 from .ps_text import match_text as _match_text_impl
 from .ps_text import replace_text as _replace_text_impl
@@ -51,44 +52,39 @@ class PSConnector:
     def __init__(self) -> None:
         self.app = None
 
-    def _handle_com_error(self, exc: Exception, attempt: int, max_retries: int) -> None:
-        """处理 COM 错误，决定是否重试或抛出异常"""
-        if not pywintypes or not isinstance(exc, pywintypes.com_error):
-            raise exc
+    @staticmethod
+    def _connect_failed_message(cold_start: bool) -> str:
+        """连不上时给员工的下一步。区分"第一次启动慢"和"真连不上"。"""
+        budget = int(ps_retry.budget_for(cold_start))
+        if cold_start:
+            head = (
+                f"Photoshop 没能在 {budget} 秒内启动完成。\n"
+                "第一次启动 PS 本来就慢，请等 PS 界面完全出来（能看到工具栏）后再点一次「生成录用图」。"
+            )
+        else:
+            head = f"连不上已经在运行的 Photoshop（已等 {budget} 秒）。"
+        return (
+            f"{head}\n"
+            "还不行就按顺序检查：\n"
+            "1. Photoshop 能手动打开，而且没有卡在弹窗上\n"
+            "2. 设置里的 Photoshop 路径指向 Photoshop.exe（不是快捷方式）\n"
+            "3. 尝试以管理员身份运行本程序\n"
+            "4. 重装/修复安装 Photoshop（COM 组件可能未注册）"
+        )
 
-        # excepinfo 属性存在但可为 None，None[0] 会抛 TypeError 并从
-        # connect 的重试逻辑中漏出（此处只应抛业务语义的异常）
-        error_code = getattr(exc, "hresult", None) or (getattr(exc, "excepinfo", None) or (None,))[0]
+    def connect(self, photoshop_exe: str = "") -> None:
+        """连接 Photoshop；PS 没开就先把它拉起来，再等 COM 就绪。
 
-        if error_code in (-2147221164, 0x80040154):
-            raise RuntimeError(
-                "Photoshop COM 组件未注册。\n请确认已安装 Photoshop，或尝试重新安装。"
-            ) from exc
-
-        if error_code in (-2146959355, 0x80080005):
-            if attempt < max_retries - 1:
-                logger.info(f"Photoshop 启动中，等待重试... ({attempt + 1}/{max_retries})")
-                time.sleep(2)
-                return
-            raise RuntimeError("无法启动 Photoshop，请手动启动后再试。") from exc
-
-        if error_code in (-2147023174, 0x800706BA):
-            raise RuntimeError("Photoshop 连接已断开，请重启 Photoshop。") from exc
-
-        raise exc
-
-    def connect(self, photoshop_exe: str) -> None:
-        """
-        Connect to Photoshop using COM interface.
+        重试预算按"PS 在不在跑"分档（冷启 60s / 已运行 10s），原因见 ps_retry
+        文件头：旧实现只有约 6 秒，而冷启动要 15~40 秒——员工装好软件后第一次
+        点生成必然失败，还会入库一条 failed 并触发失败告警。
 
         Parameters
         ----------
         photoshop_exe:
-            Path to Photoshop executable. Used for validation if needed.
+            配置里的 Photoshop 路径。以前赋值后从未使用，现在用来提前拉起进程。
         """
         ensure_com_available()
-        max_retries = 3
-        last_exception: Exception | None = None
 
         # 在未初始化 COM 的线程（如 sidecar/服务线程）中必须先 CoInitialize，
         # 否则 Dispatch 抛 "尚未调用 CoInitialize" (-2147221008)。
@@ -98,7 +94,15 @@ class PSConnector:
         except Exception:  # noqa: BLE001
             pass
 
-        for attempt in range(max_retries):
+        cold_start = not ps_retry.is_photoshop_running(win32com)
+        if cold_start:
+            ps_retry.prelaunch(photoshop_exe)
+
+        deadline = time.monotonic() + ps_retry.budget_for(cold_start)
+        attempt = 0
+        last_exception: Exception | None = None
+
+        while attempt < ps_retry.MAX_ATTEMPTS:
             try:
                 self.app = win32com.client.Dispatch("Photoshop.Application")
                 try:
@@ -106,24 +110,25 @@ class PSConnector:
                         self.app.Visible = True
                 except (AttributeError,) + COM_ERRORS:
                     pass
+                if attempt:
+                    logger.info("Photoshop 已就绪（等了 %d 轮）", attempt)
                 return
             except Exception as exc:
-                try:
-                    self._handle_com_error(exc, attempt, max_retries)
-                except RuntimeError:
+                kind = ps_retry.classify(exc)
+                if kind == ps_retry.FATAL:
+                    # 没装/没注册/已崩溃：再等也没用，别让员工对着转圈等 60 秒
+                    raise RuntimeError(ps_retry.fatal_message(exc)) from exc
+                if kind != ps_retry.RETRY:
                     raise
                 last_exception = exc
-                time.sleep(1)
+                attempt += 1
+                if attempt >= ps_retry.MAX_ATTEMPTS or time.monotonic() >= deadline:
+                    break
+                delay = ps_retry.retry_delay(attempt - 1)
+                logger.info("Photoshop 启动中，%.1f 秒后重试（第 %d 次）", delay, attempt)
+                time.sleep(delay)
 
-        if last_exception:
-            raise RuntimeError(
-                f"无法连接 Photoshop (已重试 {max_retries} 次)。\n"
-                f"请确认：\n"
-                f"1. Photoshop 已正确安装\n"
-                f"2. Photoshop 可以正常启动\n"
-                f"3. 尝试以管理员身份运行本程序"
-            ) from last_exception
-        raise RuntimeError("无法连接 Photoshop，请确认已安装并正确注册 COM 组件")
+        raise RuntimeError(self._connect_failed_message(cold_start)) from last_exception
 
     def set_display_dialogs(self, mode: int = 3) -> None:
         """

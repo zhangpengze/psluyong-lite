@@ -15,14 +15,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # 进程启动时刻：服务行的"已运行多久"（waitress 单进程多线程，import 即启动）
 _STARTED_AT = time.monotonic()
 
 _CACHE: dict = {"at": 0.0, "ttl": 0.0, "data": None}
+# waitress 8 个线程会同时打这个接口（仪表盘 + /stats/overview），
+# 边读边写 _CACHE 会读到 at 更新了但 data 还是旧的那一半
+_CACHE_LOCK = threading.Lock()
 _TTL = 30.0
 _TTL_EMPTY = 5.0
 
@@ -200,6 +207,25 @@ def _images_row() -> dict:
     return {"status": status, "detail": detail, "count": count}
 
 
+def _safe_row(name: str, builder) -> dict:
+    """取数失败的单行降级成红色行，不牵连整张卡。
+
+    这张卡和 /api/v1/stats/overview 共用同一份数据：以前 _database_row 里的
+    `Record.query.count()` 没有 try/except（同文件的 _dir_usage / _backup_row
+    都做了降级），WAL 下高峰期一次锁冲突就让整张卡连同概览接口一起 500——
+    而"系统到底好不好"恰恰是最该在故障时能打开的那一页。
+    """
+    try:
+        return builder()
+    except Exception as e:  # noqa: BLE001 - 单行取数失败不能拖垮整卡
+        logger.warning("系统状态行取数失败（%s）: %s", name, e, exc_info=True)
+        return {
+            "status": STATUS_BAD,
+            "detail": f"取数失败 · {type(e).__name__}",
+            "error": str(e)[:200],
+        }
+
+
 def system_status() -> dict:
     """仪表盘底部那张"系统自己好不好"。
 
@@ -207,20 +233,19 @@ def system_status() -> dict:
     刚灌完第一批记录就刷新页面，不该看到"图片 0 张"这种明显过期的数字。
     """
     now = time.monotonic()
-    if _CACHE["data"] is not None and now - _CACHE["at"] < _CACHE["ttl"]:
-        return _CACHE["data"]
+    with _CACHE_LOCK:
+        if _CACHE["data"] is not None and now - _CACHE["at"] < _CACHE["ttl"]:
+            return _CACHE["data"]
 
     rows = {
-        "service": _service_row(),
-        "database": _database_row(),
-        "backup": _backup_row(),
-        "report": _report_row(),
-        "images": _images_row(),
+        "service": _safe_row("service", _service_row),
+        "database": _safe_row("database", _database_row),
+        "backup": _safe_row("backup", _backup_row),
+        "report": _safe_row("report", _report_row),
+        "images": _safe_row("images", _images_row),
     }
     has_data = rows["images"].get("count") or rows["backup"].get("backups")
-    _CACHE.update(
-        at=now,
-        ttl=_TTL if has_data else _TTL_EMPTY,
-        data={"rows": rows},
-    )
-    return _CACHE["data"]
+    data = {"rows": rows}
+    with _CACHE_LOCK:
+        _CACHE.update(at=now, ttl=_TTL if has_data else _TTL_EMPTY, data=data)
+    return data

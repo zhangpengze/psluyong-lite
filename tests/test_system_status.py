@@ -273,3 +273,62 @@ def test_api_system_shape(client, clean_db, sys_dirs):
     for row in rows.values():
         assert row["status"] in ("ok", "warn", "bad", "off")
         assert row["detail"]
+
+
+# ---------- 单行取数失败不能拖垮整张卡 ----------
+
+@pytest.mark.parametrize(
+    "row_name",
+    ["database", "backup", "report", "images", "service"],
+)
+def test_one_broken_row_degrades_only_itself(client, clean_db, sys_dirs, monkeypatch, row_name):
+    """任一行取数抛错 → 该行变红并带原因，其余四行照常。
+
+    回归的是 _database_row 里 `Record.query.count()` 没有 try/except：
+    WAL 高峰期一次锁冲突就能让整张卡和 /api/v1/stats/overview 一起 500，
+    而"系统好不好"恰恰是故障时最该打得开的那一页。
+    """
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(status_mod, f"_{row_name}_row", boom)
+    rows = _rows(client)
+
+    assert set(rows) == {"service", "database", "backup", "report", "images"}
+    broken = rows[row_name]
+    assert broken["status"] == "bad"
+    assert "取数失败" in broken["detail"] and "RuntimeError" in broken["detail"]
+    assert "database is locked" in broken["error"]
+    for other in set(rows) - {row_name}:
+        assert rows[other]["status"] != "bad" or "取数失败" not in rows[other]["detail"]
+
+
+def test_broken_row_does_not_500_the_overview_api(client, clean_db, sys_dirs, monkeypatch):
+    from tests.conftest import API_KEY
+
+    monkeypatch.setattr(
+        status_mod, "_database_row", lambda: (_ for _ in ()).throw(RuntimeError("locked"))
+    )
+    resp = client.get(
+        "/api/v1/stats/overview", query_string={"range": "today"}, headers={"X-API-Key": API_KEY}
+    )
+    assert resp.status_code == 200, "单行取数失败不许把概览接口打成 500"
+    assert resp.get_json()["system"]["rows"]["database"]["status"] == "bad"
+
+
+def test_broken_row_still_renders_dashboard(admin_client, clean_db, sys_dirs, monkeypatch):
+    monkeypatch.setattr(
+        status_mod, "_images_row", lambda: (_ for _ in ()).throw(OSError("stale handle"))
+    )
+    resp = admin_client.get("/dashboard")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "取数失败" in html, "降级原因要露在页面上，否则运维看不出是磁盘还是数据库"
+
+
+def test_safe_row_passes_through_healthy_builder():
+    assert status_mod._safe_row("x", lambda: {"status": "ok", "detail": "fine"}) == {
+        "status": "ok",
+        "detail": "fine",
+    }

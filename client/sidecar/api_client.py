@@ -11,6 +11,8 @@ from typing import Any
 
 import requests
 
+from . import net
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10
@@ -40,7 +42,7 @@ class ApiClient:
         url = f"{self.base_url}{path}"
         kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
         try:
-            resp = requests.request(method, url, headers=self._headers, **kwargs)
+            resp = net.request(method, url, headers=self._headers, **kwargs)
         except requests.ConnectionError as e:
             raise ServerError(f"连不上服务器 {self.base_url}，请检查网络或服务是否启动") from e
         except requests.Timeout as e:
@@ -76,7 +78,7 @@ class ApiClient:
 
     def health(self) -> bool:
         try:
-            requests.get(f"{self.base_url}/health", timeout=3)
+            net.get(f"{self.base_url}/health", timeout=3)
             return True
         except requests.RequestException:
             return False
@@ -109,7 +111,7 @@ class ApiClient:
         url = f"{self.base_url}/api/v1/records/{record_id}/image"
         params = {"thumb": "1"} if thumb else {}
         try:
-            resp = requests.get(url, headers=self._headers, params=params, timeout=DEFAULT_TIMEOUT)
+            resp = net.get(url, headers=self._headers, params=params, timeout=DEFAULT_TIMEOUT)
         except requests.RequestException as e:
             raise ServerError(f"取图失败: {e}") from e
         if resp.status_code >= 400:

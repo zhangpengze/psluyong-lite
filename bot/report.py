@@ -8,19 +8,28 @@
     未配置 NAPCAT_WEBHOOK 时只落盘 + 记日志，不报错——
   - 单日与区间（本周/本月）共用一套「_collect_stats + _render」：
     区间版只多一个「按日」段落，统计口径完全一致。
+
+文件拆分（单文件 ≤300 行）：区间统计在 report_stats.py，落盘在 report_store.py，
+告警与节流在 report_alert.py；本文件保留渲染、推送与 run_daily 编排——
+测试以 bot.report 为 monkeypatch 面（PUSH_BACKOFF_S / push_to_group /
+PARTNER_TEMPLATE_LIMIT 等），这些名字必须留在本模块。
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import threading
 import time
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
-from sqlalchemy import func
+from .report_alert import (
+    OPS_ALERT_MIN_INTERVAL_S,
+    push_alert,
+    push_ops_alert,
+    reset_alert_throttle,
+    reset_ops_alert_throttle,
+)
+from .report_stats import _collect_stats
+from .report_store import save_push_status, save_report
 
 logger = logging.getLogger(__name__)
 
@@ -32,95 +41,6 @@ PUSH_BACKOFF_S = (5, 15)
 
 # 每个合作伙伴下面最多展开几个模板，防止某个伙伴模板太多把日报撑爆
 PARTNER_TEMPLATE_LIMIT = 5
-
-
-def _collect_stats(app, start: date, end: date) -> dict:
-    """区间统计。单日日报是 start == end 的特例。"""
-    from server.app.db import db
-    from server.app.models import STATUS_FAILED, Record
-
-    with app.app_context():
-        base = db.session.query(func.count(Record.id)).filter(
-            Record.is_deleted.is_(False),
-            Record.work_date >= start,
-            Record.work_date <= end,
-        )
-        total = base.scalar() or 0
-        failed = base.filter(Record.status == STATUS_FAILED).scalar() or 0
-
-        def group(column, limit: int = 10):
-            rows = (
-                db.session.query(column, func.count(Record.id))
-                .filter(
-                    Record.is_deleted.is_(False),
-                    Record.work_date >= start,
-                    Record.work_date <= end,
-                    column.isnot(None),
-                    column != "",
-                )
-                .group_by(column)
-                .order_by(func.count(Record.id).desc())
-                .limit(limit)
-                .all()
-            )
-            return [(name, count) for name, count in rows]
-
-        by_template = group(Record.template_name)
-        by_partner = group(Record.partner_name)
-
-        # 合作伙伴 × 模板 二维分布：按合作伙伴段落里每个伙伴下面展开，
-        # 让「农技推广中心 7 条」直接看到是农业加急 3 + 今日农业 4
-        pt_rows = (
-            db.session.query(Record.partner_name, Record.template_name, func.count(Record.id))
-            .filter(
-                Record.is_deleted.is_(False),
-                Record.work_date >= start,
-                Record.work_date <= end,
-                Record.partner_name.isnot(None),
-                Record.partner_name != "",
-            )
-            .group_by(Record.partner_name, Record.template_name)
-            .all()
-        )
-
-        by_day = (
-            db.session.query(Record.work_date, func.count(Record.id))
-            .filter(Record.is_deleted.is_(False), Record.work_date >= start, Record.work_date <= end)
-            .group_by(Record.work_date)
-            .order_by(Record.work_date.desc())
-            .all()
-        )
-
-        failed_rows = (
-            Record.query.filter(
-                Record.is_deleted.is_(False),
-                Record.work_date >= start,
-                Record.work_date <= end,
-                Record.status == STATUS_FAILED,
-            )
-            .order_by(Record.created_at.desc())
-            .limit(5)
-            .all()
-        )
-
-    # partner -> [(template, count)]，按数量降序；模板名空的归「未填模板」保证总数守恒
-    partner_templates: dict[str, list[tuple[str, int]]] = {}
-    for partner, template, count in pt_rows:
-        partner_templates.setdefault(partner, []).append((template or "未填模板", count))
-    for rows in partner_templates.values():
-        rows.sort(key=lambda item: (-item[1], item[0]))
-
-    return {
-        "start": start,
-        "end": end,
-        "total": total,
-        "failed": failed,
-        "by_template": by_template,
-        "by_partner": by_partner,
-        "partner_templates": partner_templates,
-        "by_day": [(d, c) for d, c in by_day],
-        "failed_rows": failed_rows,
-    }
 
 
 def _render(stats: dict) -> str:
@@ -191,20 +111,6 @@ def build_period_report(app, start: date, end: date) -> str:
     return _render(_collect_stats(app, start, end))
 
 
-def save_report(app, content: str, day: date) -> Path:
-    from server.app.config import DATA_DIR
-
-    report_dir = DATA_DIR / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    path = report_dir / f"{day:%Y-%m-%d}.md"
-    # 原子写：后台日报页随时在读这个文件，不能让它看到半截内容
-    tmp = path.with_suffix(".md.tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
-    logger.info("日报已落盘 %s", path)
-    return path
-
-
 def _post_with_retry(action: str, payload: dict, description: str) -> tuple[bool, str]:
     """带重试的 OneBot 动作调用。description 只用于日志，不带密钥。"""
     from server.app.config import Config
@@ -266,116 +172,6 @@ def push_to_user(user_id: int | str, content: str) -> tuple[bool, str]:
     return _post_with_retry("send_private_msg", payload, f"私聊推送 {user_id}")
 
 
-# 失败告警的最小间隔门控：PS 挂了员工连点 5 次就是 5 条失败记录，
-# 不设限会把群刷爆。值取 Config.ALERT_MIN_INTERVAL_S，测试里可调。
-_alert_lock = threading.Lock()
-_last_alert_at: float = 0.0
-
-
-def reset_alert_throttle() -> None:
-    """测试用：清空告警门控"""
-    global _last_alert_at
-    with _alert_lock:
-        _last_alert_at = 0.0
-
-
-def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, str]:
-    """录用失败即时告警：推到 REPORT_GROUP_ID。
-
-    未配置 NapCat 时静默跳过（本地开发/未接机器人时不该报错）；
-    间隔内的重复告警被抑制——失败记录本身已落库，告警只是通知。
-    """
-    from server.app.config import Config
-
-    global _last_alert_at
-    interval = Config.ALERT_MIN_INTERVAL_S if min_interval_s is None else min_interval_s
-
-    if not Config.NAPCAT_WEBHOOK:
-        return False, "未配置 NAPCAT_WEBHOOK，跳过告警"
-    if not Config.REPORT_GROUP_ID:
-        return False, "缺少 REPORT_GROUP_ID，跳过告警"
-
-    now = time.monotonic()
-    with _alert_lock:
-        if now - _last_alert_at < interval:
-            return False, f"告警间隔小于 {interval}s，已抑制"
-        _last_alert_at = now
-
-    group_id = Config.REPORT_GROUP_ID
-    payload = {
-        "group_id": int(group_id) if group_id.isdigit() else group_id,
-        "message": [{"type": "text", "data": {"text": content}}],
-    }
-    return _post_with_retry("send_group_msg", payload, "失败告警")
-
-
-# 运维告警（备份失败 / 镜像失败 / 磁盘超阈值 / 日报未推送）与"员工录用失败"
-# 是两类信息，用**各自独立**的节流器：否则凌晨备份失败会被白天的录用失败
-# 告警挤掉，反之亦然。运维类本来就不频繁，5 分钟窗口足够去重。
-_ops_lock = threading.Lock()
-_ops_last_alert_at: float = 0.0
-OPS_ALERT_MIN_INTERVAL_S = 300
-
-
-def reset_ops_alert_throttle() -> None:
-    """测试用：清空运维告警节流"""
-    global _ops_last_alert_at
-    with _ops_lock:
-        _ops_last_alert_at = 0.0
-
-
-def push_ops_alert(title: str, detail: str = "") -> tuple[bool, str]:
-    """系统级问题告警。
-
-    这些东西以前只写进日志：容器日志一轮转就消失，而"备份连续失败三天"
-    "日报根本没推出去"恰恰是没人会主动去看的那类问题。宁可推一条群消息。
-    """
-    from server.app.config import Config
-
-    global _ops_last_alert_at
-
-    if not Config.ALERT_ON_OPS_FAILURE:
-        return False, "运维告警已关闭（ALERT_ON_OPS_FAILURE=0）"
-    if not Config.NAPCAT_WEBHOOK or not Config.REPORT_GROUP_ID:
-        # 没接机器人时只记日志，不报错——本地开发不该因为这条炸掉
-        logger.warning("运维告警未发送（未配置推送）：%s｜%s", title, detail)
-        return False, "未配置推送通道"
-
-    now = time.monotonic()
-    with _ops_lock:
-        if now - _ops_last_alert_at < OPS_ALERT_MIN_INTERVAL_S:
-            return False, "运维告警间隔内，已抑制"
-        _ops_last_alert_at = now
-
-    content = f"【系统告警】{title}\n{detail}\n时间：{datetime.now():%m-%d %H:%M}"
-    group_id = Config.REPORT_GROUP_ID
-    payload = {
-        "group_id": int(group_id) if group_id.isdigit() else group_id,
-        "message": [{"type": "text", "data": {"text": content}}],
-    }
-    return _post_with_retry("send_group_msg", payload, "运维告警")
-
-
-def save_push_status(day: date, status: dict) -> Path:
-    """推送状态落盘到 reports/<日期>.status.json。
-
-    后台日报页据此显示「已推送/未推送」徽标；补推后同一文件被覆盖更新。
-    原子写：读方（网页渲染）永远不会看到半截 JSON。
-    """
-    from server.app.config import DATA_DIR
-
-    status_dir = DATA_DIR / "reports"
-    status_dir.mkdir(parents=True, exist_ok=True)
-    path = status_dir / f"{day:%Y-%m-%d}.status.json"
-    payload = dict(status)
-    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    logger.info("推送状态已记录 %s: pushed=%s", path.name, payload.get("pushed"))
-    return path
-
-
 def run_daily(app, day: date | None = None, push: bool = True, record_status: bool = True) -> dict:
     """生成 + 存档 + 推送 + 记录推送状态。返回结构化结果供接口/定时任务使用。
 
@@ -398,3 +194,23 @@ def run_daily(app, day: date | None = None, push: bool = True, record_status: bo
 
 def yesterday() -> date:
     return date.today() - timedelta(days=1)
+
+
+__all__ = [
+    "OPS_ALERT_MIN_INTERVAL_S",
+    "PARTNER_TEMPLATE_LIMIT",
+    "PUSH_ATTEMPTS",
+    "PUSH_BACKOFF_S",
+    "build_daily_report",
+    "build_period_report",
+    "push_alert",
+    "push_ops_alert",
+    "push_to_group",
+    "push_to_user",
+    "reset_alert_throttle",
+    "reset_ops_alert_throttle",
+    "run_daily",
+    "save_push_status",
+    "save_report",
+    "yesterday",
+]

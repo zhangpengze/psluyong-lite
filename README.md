@@ -22,7 +22,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               209 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               271 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -106,7 +106,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（209 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（271 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 

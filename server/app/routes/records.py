@@ -78,7 +78,8 @@ _EXPORT_HEADERS = [
     ("error_message", "错误信息"),
     ("client_machine", "提交机器"),
     ("ps_version", "PS版本"),
-    ("image_path", "图片路径"),
+    # 曾有「图片路径」列：Record.to_dict() 不含该键，列头有、数据恒空（审计 B3）。
+    # 按 D1 方案 A 删列——导出文件也不该外泄服务器文件系统路径。
 ]
 
 

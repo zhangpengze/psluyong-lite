@@ -47,7 +47,11 @@ def test_export_csv_with_session(admin_client, admin_csrf, clean_db, sample_imag
 
     header, rows = _parse_csv(resp)
     assert header[0] == "工作日期" and "作者" in header and "提交机器" in header
+    # 删列后固定 12 列：image_path 在 to_dict() 里不存在，列头有数据恒空（审计 B3 / D1 方案 A）
+    assert len(header) == 12, f"导出列数应为 12，实际 {len(header)}：{header}"
+    assert "图片路径" not in header
     assert len(rows) == 2
+    assert all(len(r) == len(header) for r in rows), "数据行列数与表头不一致"
 
     by_author = {r[5]: r for r in rows}
     assert by_author["王五"][8] == "失败"  # 状态列

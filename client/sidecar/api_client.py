@@ -65,9 +65,15 @@ class ApiClient:
         files = None
         handle = None
         try:
-            if image_path and image_path.exists():
+            if image_path and image_path.is_file():
                 handle = open(image_path, "rb")
                 files = {"image": (image_path.name, handle, "application/octet-stream")}
+            elif image_path:
+                # 传进来的图不见了。**仍然照发**（"生成失败"的记录本来就没有图，
+                # 不能一概拒发），但留一条日志：否则服务端落一条没图的记录，
+                # 现场只剩"图片呢？"而无从查起。离线补传那条路已在 queue 里
+                # 拦住这种情况（转死信），这里兜的是首次上报。
+                logger.warning("要上传的成品图已不在，本次不带图提交: %s", image_path)
             payload = self._request(
                 "POST", "/api/v1/records", data=data, files=files, timeout=UPLOAD_TIMEOUT
             )

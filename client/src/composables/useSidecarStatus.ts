@@ -3,6 +3,9 @@
  *
  * 配置 / 模板 / 名单 / 队列 / 今日计数的加载与刷新，60 秒轮询（含断线恢复
  * 自动补传）、死信重试。所有数字以 /status 为权威，界面各处只读这里的状态。
+ *
+ * 补传与"今日数"只有主窗做（ownsQueue），辅助窗只读 /status——三个窗口各跑
+ * 一份这个 composable，全都补传就会把同一批积压重复提交（见 utils/windowRole）。
  */
 
 import { computed, onUnmounted, ref, type Ref } from 'vue'
@@ -10,11 +13,14 @@ import { api, type ClientConfig, type PsInfo, type TemplateItem } from '../api/s
 import { useConfirm } from './useConfirm'
 import { useToast } from './useToast'
 import { localDateKey } from '../utils/history'
+import { ownsQueue } from '../utils/windowRole'
 
 export interface SidecarStatusOptions {
   /** 主题以服务端配置为准：refreshStatus 拿到新配置后由这里判「变没变」 */
   theme: Ref<'dark' | 'light'>
   applyTheme: (t: 'dark' | 'light') => void
+  /** 当前窗口的页面（hash 路由）：决定这个窗口要不要补传 */
+  route: Ref<string>
 }
 
 export function useSidecarStatus(opts: SidecarStatusOptions) {
@@ -135,6 +141,9 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   }
 
   async function flushQueue() {
+    // 只有主窗补传：辅助窗也调这个函数的话，同一批积压会被同时提交两三遍
+    // （5xx 的记录会被各记一次失败，MAX_ATTEMPTS 提前用完 → 提前进死信）
+    if (!ownsQueue(opts.route.value)) return
     try {
       const res = await api.flushQueue()
       pending.value = res.remaining
@@ -171,8 +180,10 @@ export function useSidecarStatus(opts: SidecarStatusOptions) {
   /**
    * 今日生成数：托盘气泡要显示，但记录窗不常开。
    * 只靠记录窗回传的话，主窗运行时气泡永远是「今日 0」，所以主窗自己也拉一次。
+   * 辅助窗不拉：托盘气泡只有主窗在用，跟着打只是白打三次接口。
    */
   async function refreshToday() {
+    if (!ownsQueue(opts.route.value)) return
     try {
       const res = await api.history('7')
       if (!res.ok) return

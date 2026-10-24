@@ -28,6 +28,8 @@ CONFIG_PATH = DATA_DIR / "config.json"
 CACHE_DIR = DATA_DIR / "cache"
 TEMPLATE_CACHE = CACHE_DIR / "templates"
 QUEUE_DIR = DATA_DIR / "pending"
+# 待补传记录的成品图副本：入队时复制一份，员工事后清理输出目录也不丢图
+IMAGE_BUFFER_DIR = DATA_DIR / "pending_images"
 # 员工把自己的 PSD 模板放这里，客户端扫这个目录出下拉框
 DEFAULT_TEMPLATE_DIR = DATA_DIR / "templates"
 

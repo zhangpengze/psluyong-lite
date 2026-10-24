@@ -132,14 +132,7 @@ def submit_fields(
             )
 
     # 顺手把之前积压的补传掉
-    flushed = queue.flush(client) if uploaded else {
-        "sent": 0,
-        "skipped": 0,
-        "remaining": len(queue.pending()),
-        "dead": len(queue.dead_letters()),
-        "blocked": len(queue.blocked_items()),
-        "block_reason": "",
-    }
+    flushed = queue.flush(client) if uploaded else queue.empty_result()
     return {
         "ok": True,
         "image_path": str(image_path) if image_path else "",

@@ -1,4 +1,4 @@
-"""离线队列
+"""离线队列（落地 + 死信），补传执行在 queue_flush
 
 网络断了不应该让员工白干一遍：生成成功的记录先落本地，
 下次启动或下次生成成功时按顺序补传。
@@ -7,12 +7,17 @@
 已被手动删掉），重试永远不会成功，还会堵住后面所有正常记录。所以
 每条记录带失败计数，累计 5 次转入 dead/ 目录留档，队列继续走。
 
+成品图不再只记路径：入队时复制一份到 image_buffer（见该模块说明）。补传时
+优先用副本，两边都找不到就**不提交**、整条转死信——旧版会让 api_client 不带
+文件提交，服务端落一条没图的记录，界面还显示已同步。
+
 拒绝码分三类（2026-10-24 修：原来把所有 4xx 一律当"业务拒绝"删掉，
 换 API Key / 服务器地址填错时会把整批积压静默删除，界面上还显示成补传成功）：
   - DISCARD_STATUS（400/409/422）：这条数据本身有问题，重发一万次也一样 → 删除
   - BLOCKING_STATUS（401/403/404）：记录没错，是环境/配置问题（Key 轮换没同步、
     地址指向旧版本）→ **保留**并标 blocked，等人修好配置后下次 flush 自动补上
   - 429 与其他未预期的 4xx：保留，本轮停止（服务端在限流/我们不认识的拒绝）
+三个集合的定义和用法都在 queue_flush，这里只是按老习惯转出来给调用方用。
 """
 
 from __future__ import annotations
@@ -24,19 +29,21 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from . import image_buffer
 from .config import DATA_DIR, QUEUE_DIR
+# 补传实现拆到 queue_flush（原因见那个模块的说明）；常量照旧从这里取，
+# reporter / 测试一直在用 queue.DISCARD_STATUS 这种写法。
+from .queue_flush import (  # noqa: F401
+    BLOCKING_STATUS,
+    CONSECUTIVE_5XX_LIMIT,
+    DISCARD_STATUS,
+    MAX_ATTEMPTS,
+    flush,
+)
 
 logger = logging.getLogger(__name__)
 
 DEAD_DIR = DATA_DIR / "dead"
-MAX_ATTEMPTS = 5
-# 连续遇到这么多条 5xx 就认为服务端整体故障，停止本次补传
-CONSECUTIVE_5XX_LIMIT = 3
-
-# 这条数据本身不合法：重试没有意义，删掉（不能留成永远补不成功的毒记录）
-DISCARD_STATUS = frozenset({400, 409, 422})
-# 环境/配置问题：记录是好的，不能删。标 blocked，修好配置后自动补传
-BLOCKING_STATUS = frozenset({401, 403, 404})
 
 
 def _ensure() -> None:
@@ -48,12 +55,28 @@ def _dead_dir() -> Path:
     return DEAD_DIR
 
 
+def _buffer_image(image_path: str | None, item_id: str) -> Path | None:
+    """入队时把成品图复制一份。复制不了不阻断入队，flush 时退回用原路径。"""
+    raw = (image_path or "").strip()
+    if not raw:
+        return None
+    source = Path(raw)
+    if not source.is_file():
+        # 记录生成完就被挪走了：没有图可复制。照常入队，flush 时按"缺图"转死信
+        logger.warning("入队时成品图已不在，无法复制补传缓冲: %s", raw)
+        return None
+    return image_buffer.store(source, item_id)
+
+
 def enqueue(fields: dict, image_path: str | None, blocked_reason: str = "") -> Path:
     """记录入队。blocked_reason 非空表示"环境问题导致暂时传不上去"（如 401），
     界面据此提示员工去检查设置，而不是显示成正常待补传。"""
     _ensure()
     item_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
     payload = {"fields": fields, "image_path": image_path, "created_at": datetime.now().isoformat()}
+    buffered = _buffer_image(image_path, item_id)
+    if buffered is not None:
+        payload["buffered_image"] = str(buffered)
     if blocked_reason:
         payload["blocked"] = True
         payload["blocked_reason"] = blocked_reason
@@ -95,22 +118,43 @@ def load(path: Path) -> dict | None:
         return None
 
 
-def remove(path: Path) -> None:
-    """成功补传或业务拒绝后删除。损坏文件的留档走 _to_dead。"""
+def remove(path: Path, item: dict | None = None) -> None:
+    """成功补传或业务拒绝后删除。损坏文件的留档走 to_dead。
+
+    顺手删掉缓冲里的成品图：记录已经落地了，副本留着只会白占磁盘。
+    """
+    if item:
+        image_buffer.discard(item)
     path.unlink(missing_ok=True)
 
 
-def _rewrite(path: Path, item: dict) -> None:
+def empty_result() -> dict:
+    """没做补传时给界面的空结果。形状必须和 flush() 完全一致——
+    少一个字段前端拿到的是 undefined，比报错更难查。"""
+    return {
+        "sent": 0,
+        "skipped": 0,
+        "lost": 0,
+        "remaining": len(pending()),
+        "dead": len(dead_letters()),
+        "blocked": len(blocked_items()),
+        "block_reason": "",
+    }
+
+
+def rewrite(path: Path, item: dict) -> None:
     """更新失败计数等元数据。写坏也不至于丢记录：tmp + 原子替换。"""
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
 
-def _to_dead(path: Path, item: dict, reason: str) -> None:
+def to_dead(path: Path, item: dict, reason: str) -> None:
     item["dead_reason"] = reason
     item["dead_at"] = datetime.now().isoformat()
     target = _dead_dir() / path.name
+    # 死信要自带图：人工点"重试死信"时还能补上，否则这条记录只剩字段没有成品
+    image_buffer.to_dead(item, DEAD_DIR, path.stem)
     try:
         tmp = target.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -140,6 +184,8 @@ def retry_dead() -> dict:
         item.pop("failures", None)
         item.pop("dead_reason", None)
         item.pop("dead_at", None)
+        # 图搬回缓冲，别让它一直躺在 dead/ 里（重试成功后缓冲会被一起清掉）
+        image_buffer.restore(item)
         try:
             _ensure()
             target = QUEUE_DIR / path.name
@@ -154,87 +200,3 @@ def retry_dead() -> dict:
     if restored:
         logger.info("已把 %d 条死信搬回队列待重试", restored)
     return {"restored": restored, "failed": failed, "dead": len(dead_letters())}
-
-
-def flush(client) -> dict:
-    """按顺序补传。
-
-    - 网络不通（status=0）：立即停，后面的大概率也失败，且记录不该被计数
-    - 服务端 5xx：可能是整体故障也可能是单条毒记录——计数 +1，连续多条
-      5xx 才停；单条累计 MAX_ATTEMPTS 次转死信
-    - 400/409/422（数据本身不合法）：删记录跳过，不值得重试
-    - 401/403/404（环境/配置问题）：**保留**并标 blocked，立即停本轮
-      （同一个 Key/地址对整批都一样，继续试只会把剩下每条都标一遍）
-    - 429 及其他 4xx：保留，停本轮，不计失败次数
-
-    返回值里的 blocked 是**当前**受阻条目数（不是本轮新增），界面直接显示。
-    """
-    from .api_client import ServerError
-
-    sent = skipped = 0
-    consecutive_5xx = 0
-    block_reason = ""
-    for path in pending():
-        item = load(path)
-        if item is None:
-            # 损坏文件移入死信留档（保留原始内容供排查），而不是悄悄删掉
-            raw = path.read_text(encoding="utf-8", errors="replace")[:4000]
-            _to_dead(path, {"corrupt_raw": raw}, "文件损坏")
-            skipped += 1
-            continue
-        image_path = Path(item["image_path"]) if item.get("image_path") else None
-        try:
-            client.submit_record(item["fields"], image_path)
-            remove(path)
-            sent += 1
-            consecutive_5xx = 0
-        except ServerError as e:
-            if e.status == 0:
-                logger.warning("补传中断（服务端不可用）: %s", e.message)
-                break
-            if e.status >= 500:
-                failures = int(item.get("failures", 0)) + 1
-                consecutive_5xx += 1
-                # 先写进 item 再判断，否则死信里留下的是上一轮的旧计数
-                item["failures"] = failures
-                if failures >= MAX_ATTEMPTS:
-                    _to_dead(path, item, f"连续 {failures} 次服务端错误: {e.message}")
-                    continue
-                _rewrite(path, item)
-                if consecutive_5xx >= CONSECUTIVE_5XX_LIMIT:
-                    logger.warning("连续 %d 条 5xx，暂停补传（服务端疑似整体故障）", consecutive_5xx)
-                    break
-                continue
-
-            if e.status in DISCARD_STATUS:
-                logger.info("补传丢弃（这条数据服务端不接受）: %s -> %s", path.name, e.message)
-                remove(path)
-                skipped += 1
-                continue
-
-            if e.status in BLOCKING_STATUS:
-                # 关键：不删。换 Key 忘同步、服务器地址指向旧版本时，整批积压都会
-                # 401/404；旧版在这里 remove()，员工界面上"待补传 3 条"直接变 0，
-                # 看起来像补传成功，实际记录全丢且不可恢复。
-                item["blocked"] = True
-                item["blocked_reason"] = f"HTTP {e.status}: {e.message}"
-                item["blocked_at"] = datetime.now().isoformat()
-                _rewrite(path, item)
-                block_reason = item["blocked_reason"]
-                logger.error("补传受阻（配置问题，已保留）: %s -> %s", path.name, item["blocked_reason"])
-                break
-
-            # 429 限流与其他 4xx：保留、停本轮，不计失败次数（不是这条数据的问题）
-            logger.warning("补传暂停（服务端拒绝 %s）: %s", e.status, e.message)
-            block_reason = f"HTTP {e.status}: {e.message}"
-            break
-
-    return {
-        "sent": sent,
-        "skipped": skipped,
-        "remaining": len(pending()),
-        # 直接数以目录为准：dead 计数器含本轮新转入的，再加目录数会算两遍
-        "dead": len(dead_letters()),
-        "blocked": len(blocked_items()),
-        "block_reason": block_reason,
-    }

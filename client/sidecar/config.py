@@ -28,6 +28,7 @@ from .config_schema import (  # noqa: F401
     CONFIG_PATH,
     DATA_DIR,
     DEFAULT_TEMPLATE_DIR,
+    IMAGE_BUFFER_DIR,
     QUEUE_DIR,
     TEMPLATE_CACHE,
     ClientConfig,
@@ -265,5 +266,5 @@ def reset_last_recovery() -> None:
 
 
 def ensure_dirs() -> None:
-    for path in (DATA_DIR, CACHE_DIR, TEMPLATE_CACHE, QUEUE_DIR, DEFAULT_TEMPLATE_DIR):
+    for path in (DATA_DIR, CACHE_DIR, TEMPLATE_CACHE, QUEUE_DIR, IMAGE_BUFFER_DIR, DEFAULT_TEMPLATE_DIR):
         path.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               791 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               803 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -42,6 +42,8 @@ tests/               791 个用例，覆盖 API、权限、去重与失败重试
                      必填占位符未命中判失败、测试连接四档结论、
                      一键诊断包（配置脱敏/日志截尾/逐项降级）、
                      内网请求绕开系统代理、上线预检脚本三态判据、
+                     补传成品图缓冲（清理输出目录不丢图/副本过期清理/死信带走图）、
+                     补传并发互斥（多窗口不会重复提交、失败计数不重复累加）、
                      员工手册与界面文案同步
 ```
 
@@ -121,7 +123,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（791 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（803 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -129,7 +131,7 @@ cd client && npm run typecheck && npm test      # 前端类型检查与单测
 
 ```bash
 cd client
-npm test            # vitest：日期分组、toast 去重、草稿存取
+npm test            # vitest：日期分组、toast 去重、草稿存取、哪个窗口才补传
 npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 ```
 
@@ -193,6 +195,8 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 | 双击桌面图标把窗口藏起来 | 第二个实例只调 `show_main_window`（还原 → 显示 → 聚焦），托盘菜单才用 toggle | 员工双击图标的意思是"把窗口给我看"。原来复用托盘的 toggle：窗口正显示着时双击反而把它藏起来，看起来就是"点了没反应"，再双击又冒出来——最容易被当成"软件坏了"的一类症状 |
 | "记住上次用的作者"写失败被当成生成失败 | 这一步单独 try/catch，失败只打控制台 | 图已经导出、记录已经上报，只差写一行配置。它在主 try 里时，`saveConfig` 一抛（磁盘满/被占用）就把结论翻成失败，员工看到失败必然再点一次 → 撞 409（当天重复提交）→ 白跑一轮 PS，还多一条 failed 污染失败率 |
 | `/open-folder` 能打开任意目录 | 白名单：只许输出目录、模板目录、数据目录，路径 `resolve()` 后按 `os.sep` 边界比对 | sidecar 绑 127.0.0.1，任何能发 POST 的东西（哪怕一段网页 fetch）都能借它把任意目录弹到员工屏幕上。用 `normcase` 处理大小写，用 `base + os.sep` 避免 `期刊录用2` 被当成 `期刊录用` 的子目录 |
+| 补传时成品图被清理掉了，仍建了一条无图记录 | 入队时把图复制进 `%APPDATA%\psluyong-lite\pending_images`，补传优先用副本；缓冲和原目录都找不到就**不提交**、整条转死信（图跟着进 `dead/`） | 队列原来只存图片**路径**：员工整理输出目录后，补传时 `api_client` 发现文件不在就不带文件提交，服务端落一条没图的记录，界面上还写着"已同步"——数据看着完整，实际废了，没人会发现。副本按天留 7 天，成功落地的记录副本立刻删掉 |
+| 三个窗口同时补传，同一批记录提交两三遍 | 只有主窗（`ownsQueue`）补传与拉今日数；sidecar 那边一把非阻塞锁（`queue_flush`），正在补传时第二个请求直接返回当前积压 | 主窗/记录窗/设置窗是三个独立 WebView，各跑一份 App.vue，启动时全都 `flushQueue`。成功记录有服务端唯一索引兜底（409），但 5xx 的记录会被两边各记一次失败——`MAX_ATTEMPTS` 提前用完，本该还能重试的记录被提前丢进死信，这是真丢数据；两个请求还会同时改写同一个 json |
 
 ## 部署
 

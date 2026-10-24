@@ -44,7 +44,7 @@ const {
   loadError, serverBusy, todayCount,
   refreshStatus, waitForSidecar, refreshTemplates, refreshDicts,
   flushQueue, retryDead, refreshToday, startPolling,
-} = useSidecarStatus({ theme, applyTheme })
+} = useSidecarStatus({ theme, applyTheme, route })
 
 // ==================== 生成中状态（关窗拦截 + 贴边不缩回用）====================
 // formBusy：录用页实时上报；serverBusy：sidecar 权威值（切窗口后仍然准确）

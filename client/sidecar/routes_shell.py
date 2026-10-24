@@ -195,8 +195,5 @@ def register_shell_routes(app: Flask, _client) -> None:
         """把死信搬回队列并立刻试着补传一次。"""
         moved = queue.retry_dead()
         cfg = load_config()
-        flushed = queue.flush(_client(cfg)) if moved["restored"] else {
-            "sent": 0, "skipped": 0, "remaining": len(queue.pending()), "dead": moved["dead"],
-            "blocked": len(queue.blocked_items()), "block_reason": "",
-        }
+        flushed = queue.flush(_client(cfg)) if moved["restored"] else queue.empty_result()
         return jsonify({"ok": True, "restored": moved["restored"], "failed": moved["failed"], **flushed})

@@ -5,14 +5,13 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from flask import Blueprint, Response, jsonify, request
-from sqlalchemy import func
 
 from ..audit import log_action
 from ..auth import api_or_session
-from ..db import db
-from ..models import STATUS_FAILED, STATUS_SUCCESS, Record
+from ..models import Record
 from ..overview import RangeError, get_overview, parse_limit, parse_range
 from ..panels import overview_csv, overview_html
+from ..services import stats_service
 
 bp = Blueprint("stats", __name__, url_prefix="/api/v1/stats")
 
@@ -26,39 +25,6 @@ def _parse_date(value: str | None, default: date) -> date:
         return default
 
 
-def _group_count(start: date, end: date, column) -> list[dict]:
-    rows = (
-        db.session.query(column, func.count(Record.id))
-        .filter(
-            Record.is_deleted.is_(False),
-            Record.work_date >= start,
-            Record.work_date <= end,
-            column.isnot(None),
-            column != "",
-        )
-        .group_by(column)
-        .order_by(func.count(Record.id).desc())
-        .all()
-    )
-    return [{"name": name, "count": count} for name, count in rows]
-
-
-def _totals(start: date, end: date) -> dict:
-    base = db.session.query(func.count(Record.id)).filter(
-        Record.is_deleted.is_(False),
-        Record.work_date >= start,
-        Record.work_date <= end,
-    )
-    total = base.scalar() or 0
-    failed = base.filter(Record.status == STATUS_FAILED).scalar() or 0
-    return {
-        "total": total,
-        "success": total - failed,
-        "failed": failed,
-        "success_rate": round((total - failed) / total * 100, 1) if total else 0.0,
-    }
-
-
 @bp.get("/daily")
 @api_or_session
 def daily():
@@ -68,10 +34,10 @@ def daily():
         {
             "ok": True,
             "date": day.isoformat(),
-            **_totals(day, day),
-            "by_employee": _group_count(day, day, Record.employee_name),
-            "by_template": _group_count(day, day, Record.template_name),
-            "by_partner": _group_count(day, day, Record.partner_name),
+            **stats_service.totals(day, day),
+            "by_employee": stats_service.group_count(day, day, Record.employee_name),
+            "by_template": stats_service.group_count(day, day, Record.template_name),
+            "by_partner": stats_service.group_count(day, day, Record.partner_name),
         }
     )
 
@@ -88,34 +54,16 @@ def trend():
     end = _parse_date(request.args.get("end"), date.today())
     start = end - timedelta(days=days - 1)
 
-    rows = (
-        db.session.query(Record.work_date, func.count(Record.id))
-        .filter(
-            Record.is_deleted.is_(False),
-            Record.work_date >= start,
-            Record.work_date <= end,
-        )
-        .group_by(Record.work_date)
-        .all()
-    )
-    counted = {d: c for d, c in rows}
-
-    series = []
-    cursor = start
-    while cursor <= end:
-        series.append({"date": cursor.isoformat(), "count": counted.get(cursor, 0)})
-        cursor += timedelta(days=1)
-
     return jsonify(
         {
             "ok": True,
             "start": start.isoformat(),
             "end": end.isoformat(),
-            "series": series,
-            **_totals(start, end),
-            "by_employee": _group_count(start, end, Record.employee_name),
-            "by_template": _group_count(start, end, Record.template_name),
-            "by_partner": _group_count(start, end, Record.partner_name),
+            "series": stats_service.trend_series(start, end),
+            **stats_service.totals(start, end),
+            "by_employee": stats_service.group_count(start, end, Record.employee_name),
+            "by_template": stats_service.group_count(start, end, Record.template_name),
+            "by_partner": stats_service.group_count(start, end, Record.partner_name),
         }
     )
 

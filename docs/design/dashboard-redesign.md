@@ -62,7 +62,7 @@
 `limit` 伙伴明细展示条数（默认 20，0 = 全部，上限 500，非法值退回默认）。
 非法区间返回 400 + 中文错误（起>止 / 缺日期 / 格式错 / 超 90 天 / 未来日期 / 未知档位）。
 
-响应（结构化字段 + `html` 片段，片段由 panels.py 生成并转义，Jinja 首屏与 JS
+响应（结构化字段 + `html` 片段，片段由 panels/ 包生成并转义，Jinja 首屏与 JS
 轮询复用同一份标记，避免两套渲染漂移）：
 
 ```
@@ -145,8 +145,8 @@ html{kpi, trend, top, table, details[], note, status}
 
 | 文件 | 改动 |
 |---|---|
-| `server/app/overview.py` | 新增：区间解析、聚合、缓存、口径 |
-| `server/app/panels.py` | 新增：HTML 片段渲染（escape 后给 Jinja/JS 共用） |
+| `server/app/overview/` | 新增（包）：区间解析、聚合、缓存、口径 |
+| `server/app/panels/` | 新增（包）：HTML 片段渲染（escape 后给 Jinja/JS 共用） |
 | `server/app/status.py` | 新增：系统状态（从 web/views.py 拆出共享） |
 | `server/app/routes/stats.py` | 新增 `GET /overview` |
 | `server/app/routes/records.py` | 新增/删除/恢复后失效概览缓存 |

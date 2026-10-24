@@ -15,14 +15,18 @@ core/                PS 自动化引擎（纯 Python，无 UI 依赖）
   runner.py          一次生成的完整编排
 server/              Flask 后端 + 主管后台（Jinja2）
   app/models.py      AdminUser / Record / AuditLog
-  app/routes/        records / stats / reports / health
+  app/routes/        records / records_csv / stats / reports / bot / health
+  app/services/      业务服务层（记录读写、统计聚合、登录校验、审计与日报取数）
+  app/panels/        概览 HTML 片段渲染（包，Jinja/JS 共用一份标记）
+  app/overview/      概览区间解析与聚合取数（包）
   app/web/           后台页面与样式（无 CDN 依赖，可离线；亮/暗双主题）
+  backup/            数据库备份（包）
 client/              Tauri 2 + Vue 3 员工客户端
   sidecar/           Python 本地服务（调 PS、上报、离线队列）
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               271 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               288 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -106,7 +110,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（271 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（288 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 

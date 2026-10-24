@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify
-from sqlalchemy import text
 
-from ..db import db
+from ..services import health_service
 
 bp = Blueprint("health", __name__)
 
@@ -20,7 +19,7 @@ def health():
 def ready():
     """就绪探针：真连一次数据库，连不上就别把流量放进来"""
     try:
-        db.session.execute(text("SELECT 1"))
+        health_service.ping_database()
         return jsonify({"ok": True, "status": "ready", "db": "ok"})
     except Exception as e:  # noqa: BLE001
         # 异常原文（表名、路径、SQL）只进日志，不回给调用方

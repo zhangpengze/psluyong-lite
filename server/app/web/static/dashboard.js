@@ -1,13 +1,16 @@
-/* 数据概览页：时间范围切换、30 秒轮询、伙伴行展开。
+/* 数据概览页（核心）：时间范围切换、数据加载、30 秒轮询、事件绑定。
  *
- * 首屏由服务端渲染（dashboard.html 里 Jinja 直出 panels.py 的片段），
+ * 拆分说明：渲染逻辑（片段替换、伙伴行展开、TOP5 定位）在
+ * dashboard-render.js，本文件是状态与轮询的宿主。两边经
+ * window.__dashboardPage 共享状态——无打包器的原生 JS，按
+ * dashboard.js → dashboard-render.js 顺序引入；脚本同步执行完
+ * 才会有事件与轮询触发，双方互调在调用期解析，顺序无隐患。
+ *
+ * 首屏由服务端渲染（dashboard.html 里 Jinja 直出 panels 的片段），
  * 本文件只做三件事：
- *   1. 切范围 / 刷新时调 /api/v1/stats/overview，用返回的 html 片段原地替换
+ *   1. 切范围 / 刷新时调 /api/v1/stats/overview，交给渲染端原地替换
  *   2. 30 秒轮询：页面不可见时跳过，可见且过期立即补一次；连续失败 3 次才提示
- *   3. 伙伴行展开 / 收起：模板明细随首屏数据一起下发，展开不发请求
- *
- * html 片段全部由服务端生成并转义（panels.py），这里只 innerHTML，
- * 不拿用户数据拼字符串——伙伴名 / 模板名不会成为 XSS 入口。
+ *   3. 事件绑定：区间 chip / 自定义日期 / 刷新 / 行展开 / TOP5 / 后退前进
  */
 (function () {
   'use strict';
@@ -15,30 +18,23 @@
   var root = document.getElementById('dashboard-root');
   if (!root) return;
 
+  // 与 dashboard-render.js 的共享挂载点：渲染端往这挂 apply/jumpToPartner/toggleRow
+  var D = (window.__dashboardPage = {
+    root: root,
+    current: null,   // 最近一次成功的数据（渲染端写入，回滚时读取）
+    showAll: false   // 伙伴表是否已展开全部（带上 limit=0 轮询）
+  });
+
   var POLL_MS = 30000;
-  var boxes = {
-    kpi: document.getElementById('kpi-row'),
-    trend: document.getElementById('trend-card'),
-    top: document.getElementById('top-card'),
-    table: document.getElementById('partner-table-box'),
-    note: document.getElementById('table-note-box'),
-    status: document.getElementById('system-status-box')
-  };
   var chips = Array.prototype.slice.call(document.querySelectorAll('#range-bar .chip[data-range]'));
   var customStart = document.getElementById('custom-start');
   var customEnd = document.getElementById('custom-end');
   var customApply = document.getElementById('custom-apply');
   var rangeError = document.getElementById('range-error');
   var refreshBtn = document.getElementById('refresh-btn');
-  var recordsLink = document.getElementById('all-records-link');
-  var exportLink = document.getElementById('export-overview');
-  var updatedAt = document.getElementById('last-updated');
 
-  var current = null;   // 最近一次成功的数据
-  var expanded = {};    // 展开中的伙伴名 -> true（轮询重渲染后要恢复）
-  var showAll = false;  // 伙伴表是否已展开全部（带上 limit=0 轮询）
   var inflightP = null;   // 进行中的请求（共享引用）：轮询与手动加载互斥，也不会自旋
-  var inflightUrl = '';   // 进行中请求对应的区间 URL（判断切档后是否要补拉）
+  var inflightUrl = '';   // 进行中请求对应的区间（判断切档后是否要补拉）
   var fails = 0;
   var lastOkAt = 0;
   var timer = null;
@@ -51,7 +47,7 @@
     var s = state();
     var q = 'range=' + encodeURIComponent(s.range);
     if (s.range === 'custom') q += '&start=' + encodeURIComponent(s.start) + '&end=' + encodeURIComponent(s.end);
-    if (showAll) q += '&limit=0';
+    if (D.showAll) q += '&limit=0';
     return '/api/v1/stats/overview?' + q;
   }
 
@@ -83,115 +79,14 @@
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
   }
 
-  /* ---------- 渲染 ---------- */
-  function apply(data) {
-    current = data;
-    root.dataset.range = data.range.preset;
-    root.dataset.start = data.range.start;
-    root.dataset.end = data.range.end;
-
-    if (boxes.kpi) boxes.kpi.innerHTML = data.html.kpi;
-    if (boxes.trend) boxes.trend.innerHTML = data.html.trend;
-    if (boxes.top) boxes.top.innerHTML = data.html.top;
-    if (boxes.table) boxes.table.innerHTML = data.html.table;
-    if (boxes.note) boxes.note.innerHTML = data.html.note;
-    if (boxes.status) boxes.status.innerHTML = data.html.status;
-
-    if (updatedAt) {
-      updatedAt.textContent = '最后更新于 ' + data.updated_at;
-      updatedAt.classList.add('just');
-      setTimeout(function () { updatedAt.classList.remove('just'); }, 1200);
-    }
-    if (recordsLink) {
-      recordsLink.href = '/records?start=' + data.range.start + '&end=' + data.range.end;
-    }
-    if (exportLink) {
-      exportLink.href = exportUrl();
-    }
-    syncChips();
-    reapplyExpanded();
-    showError('');
-  }
-
-  function detailFor(name) {
-    if (!current) return null;
-    for (var i = 0; i < current.partners.length; i++) {
-      if (current.partners[i].name === name && current.html.details[i]) {
-        return current.html.details[i];
-      }
-    }
-    return null;
-  }
-
-  function expandRow(row) {
-    var name = row.dataset.name;
-    if (row.nextElementSibling && row.nextElementSibling.classList.contains('detail-row')) return;
-    var html = detailFor(name);
-    if (!html) return;
-    var tpl = document.createElement('template');
-    tpl.innerHTML = html;
-    row.after(tpl.content.firstChild);
-    row.classList.add('open');
-    row.setAttribute('aria-expanded', 'true');
-    expanded[name] = true;
-  }
-
-  function collapseRow(row) {
-    var next = row.nextElementSibling;
-    if (next && next.classList.contains('detail-row')) next.remove();
-    row.classList.remove('open');
-    row.setAttribute('aria-expanded', 'false');
-    delete expanded[row.dataset.name];
-  }
-
-  function toggleRow(row) {
-    if (row.classList.contains('open')) collapseRow(row);
-    else expandRow(row);
-  }
-
-  function reapplyExpanded() {
-    var tbody = boxes.table && boxes.table.querySelector('tbody');
-    if (!tbody) return;
-    Array.prototype.forEach.call(tbody.querySelectorAll('tr.partner-row'), function (row) {
-      if (expanded[row.dataset.name]) expandRow(row);
-    });
-  }
-
-  /* ---------- TOP5 定位：滚到明细表对应行，展开并高亮两秒 ---------- */
-  function jumpToPartner(name, attempt) {
-    attempt = attempt || 0;
-    var tbody = boxes.table && boxes.table.querySelector('tbody');
-    if (!tbody) return;
-    var target = null;
-    Array.prototype.forEach.call(tbody.querySelectorAll('tr.partner-row'), function (row) {
-      if (row.dataset.name === name) target = row;
-    });
-    if (!target) {
-      // 伙伴不在当前截断的表格里（超过前 limit 家）：先显示全部再定位。
-      // 最多补拉两次——若 join 上的那次请求没带 limit=0（撞上正在进行的轮询），
-      // 第二次才是真请求；两次之后仍找不到就是数据里真没有，不能再循环。
-      if (attempt >= 2) return;
-      showAll = true;
-      load(false).then(function () { jumpToPartner(name, attempt + 1); });
-      return;
-    }
-    expandRow(target);
-    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
-    target.classList.remove('flash-row');
-    void target.offsetWidth;  // 重置动画，连点也能重新闪
-    target.classList.add('flash-row');
-    setTimeout(function () { target.classList.remove('flash-row'); }, 2000);
-  }
-
   /* ---------- 数据 ---------- */
   // 服务端拒了区间（400）时回滚到上一次成功的区间：
   // 否则 chip 指着一个没有数据的档，轮询还会每 30 秒 400 一次。
   function revertState() {
-    if (!current) return;
-    root.dataset.range = current.range.preset;
-    root.dataset.start = current.range.start;
-    root.dataset.end = current.range.end;
+    if (!D.current) return;
+    root.dataset.range = D.current.range.preset;
+    root.dataset.start = D.current.range.start;
+    root.dataset.end = D.current.range.end;
     syncChips();
     history.replaceState(null, '', rangeUrl());
   }
@@ -226,7 +121,7 @@
         }
         throw new Error(msg);
       }
-      apply(res.data);
+      D.apply(res.data);
       fails = 0;
       lastOkAt = Date.now();
     }).catch(function (err) {
@@ -276,6 +171,13 @@
     }, POLL_MS);
   }
 
+  // 供 dashboard-render.js 调用（渲染端只反向依赖这几个）
+  D.overviewUrl = overviewUrl;
+  D.exportUrl = exportUrl;
+  D.showError = showError;
+  D.syncChips = syncChips;
+  D.load = load;
+
   /* ---------- 事件 ---------- */
   chips.forEach(function (chip) {
     chip.addEventListener('click', function () {
@@ -310,17 +212,17 @@
   document.addEventListener('click', function (e) {
     var more = e.target.closest('#show-more-partners');
     if (more) {
-      showAll = true;  // 之后轮询也带 limit=0，不再缩回去
+      D.showAll = true;  // 之后轮询也带 limit=0，不再缩回去
       load(true);
       return;
     }
     var top = e.target.closest('.top-row');
     if (top) {
-      jumpToPartner(top.dataset.partner);
+      D.jumpToPartner(top.dataset.partner);
       return;
     }
     var row = e.target.closest('tr.partner-row');
-    if (row && !e.target.closest('a, button')) toggleRow(row);
+    if (row && !e.target.closest('a, button')) D.toggleRow(row);
   });
 
   // 键盘也能展开：行上有 tabindex=0，回车 / 空格触发（与记录页一致）
@@ -329,13 +231,13 @@
     var top = e.target.closest && e.target.closest('.top-row');
     if (top) {
       e.preventDefault();
-      jumpToPartner(top.dataset.partner);
+      D.jumpToPartner(top.dataset.partner);
       return;
     }
     var row = e.target.closest && e.target.closest('tr.partner-row');
     if (!row || e.target.closest('a, button')) return;
     e.preventDefault();
-    toggleRow(row);
+    D.toggleRow(row);
   });
 
   // 页面重新可见时，若距上次成功加载已超过一个轮询周期，立即补一次

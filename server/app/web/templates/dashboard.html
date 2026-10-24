@@ -3,8 +3,9 @@
 {% block title %}数据概览{% endblock %}
 
 {% block content %}
-{# 首屏由服务端直出（panels.py 生成片段）；dashboard.js 负责切换时间范围、
-   30 秒轮询与伙伴行展开，轮询回来的是同一套片段，原地替换。 #}
+{# 首屏由服务端直出（panels/ 包生成片段）；dashboard.js 负责切换时间范围、
+   30 秒轮询与事件绑定，dashboard-render.js 负责片段替换与伙伴行展开，
+   轮询回来的是同一套片段，原地替换。 #}
 <div id="dashboard-root" data-range="{{ ov.range.preset }}" data-start="{{ ov.range.start }}" data-end="{{ ov.range.end }}">
   <div class="page-head">
     <div>
@@ -53,4 +54,5 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='dashboard.js', v=asset_version()) }}"></script>
+<script src="{{ url_for('static', filename='dashboard-render.js', v=asset_version()) }}"></script>
 {% endblock %}

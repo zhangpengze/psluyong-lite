@@ -37,7 +37,7 @@ def _secret_ok() -> bool:
 def _handle_async(app, payload: dict) -> None:
     """后台线程里跑 handler，任何异常都不能逃出线程变成静默死亡。
 
-    包 app_context：handler 里的审计写入（log_action → db.session）
+    包 app_context：handler 里的审计写入（log_action 要写数据库会话）
     需要应用上下文，而后台线程没有。
     """
     from bot.handler import handle_event

@@ -1,11 +1,13 @@
-"""后台页面（服务端渲染）"""
+"""后台页面（服务端渲染）
+
+只做三件事：解析请求参数 → 调 service 取数 → 组装模板/跳转。
+业务逻辑（口令校验、审计查询、日报文件读取）全在 services/。
+"""
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, timedelta
 
 from flask import (
     Blueprint,
@@ -19,14 +21,13 @@ from flask import (
 )
 
 from ..audit import ACTION_LABELS, log_action
-from ..auth import admin_required, current_user, generate_csrf_token, login_required
-from ..db import db
-from ..models import AdminUser
+from ..auth import current_user, generate_csrf_token, login_required
+from ..config import Config
 from ..overview import RangeError, get_overview, parse_limit, parse_range
 from ..panels import overview_html
 from ..ratelimit import hit as rate_hit
 from ..ratelimit import reset as rate_reset
-from ..services import records_read, records_service
+from ..services import audit_service, auth_admin, records_read, records_service, report_read
 
 bp = Blueprint("web", __name__)
 logger = logging.getLogger(__name__)
@@ -81,9 +82,8 @@ def login():
             resp.headers["Retry-After"] = str(retry_after)
             return resp
 
-        user = AdminUser.query.filter_by(username=username, is_active=True).first()
-        # 用户名不存在也走一次 hash 校验，避免响应时间泄露账号是否存在
-        if user is None or not user.check_password(password):
+        user = auth_admin.authenticate(username, password)
+        if user is None:
             logger.warning("登录失败 username=%s ip=%s", username, request.remote_addr)
             log_action("login_failed", detail=f"username={username}", actor=username or "-")
             flash("用户名或密码错误", "error")
@@ -92,8 +92,6 @@ def login():
         session.clear()
         session["uid"] = user.id
         session.permanent = True
-        user.last_login_at = datetime.utcnow()
-        db.session.commit()
         rate_reset(limit_key)
         logger.info("登录成功 username=%s ip=%s", username, request.remote_addr)
         log_action("login", detail=f"username={username} role={user.role}", actor=username)
@@ -206,43 +204,11 @@ def records():
 @bp.get("/reports")
 @login_required
 def reports():
-    """展示最近生成的日报（bot 写入 report 目录）"""
-    import json
-
-    from ..config import DATA_DIR, Config
-
-    report_dir = DATA_DIR / "reports"
-    files = sorted(report_dir.glob("*.md"), reverse=True)[:30] if report_dir.exists() else []
-
-    # 每条日报的推送状态（bot/report.save_push_status 落盘的同名 JSON）
-    statuses: dict[str, dict] = {}
-    for f in files:
-        status_file = report_dir / f"{f.stem}.status.json"
-        try:
-            statuses[f.stem] = json.loads(status_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass  # 老日报没有状态文件，不显示徽标
-
-    selected = request.args.get("file", "")
-    content = ""
-    if selected:
-        candidate = report_dir / selected
-        # 防目录穿越：只允许 report_dir 下的 .md
-        if candidate.suffix == ".md" and candidate.parent.resolve() == report_dir.resolve():
-            if candidate.exists():
-                content = candidate.read_text(encoding="utf-8")
-    elif files:
-        selected = files[0].name
-        content = files[0].read_text(encoding="utf-8")
-
-    # 重推时用文件名反解日期，解不出来就不给按钮——比让接口悄悄改成
-    # "今天就今天"强，那样会把错误的日期推给全公司
-    selected_date = None
-    if selected:
-        try:
-            selected_date = datetime.strptime(Path(selected).stem, "%Y-%m-%d").date()
-        except ValueError:
-            selected_date = None
+    """展示最近生成的日报（bot 写入 report 目录）。取数与路径校验在 report_read。"""
+    files = report_read.list_reports()
+    statuses = report_read.load_statuses(files)
+    selected, content = report_read.resolve_content(request.args.get("file", ""), files)
+    selected_date = report_read.parse_report_date(selected)
 
     return render_template(
         "reports.html",
@@ -259,33 +225,17 @@ def reports():
 @bp.get("/audit")
 @login_required
 def audit():
-    """后台写操作的审计流水（删除/恢复/导出/重推/登录）"""
-    from ..models import AuditLog
-
+    """后台写操作的审计流水（删除/恢复/导出/重推/登录）。取数在 audit_service。"""
     try:
         page = max(1, int(request.args.get("page", 1)))
     except ValueError:
         page = 1
     action = (request.args.get("action") or "").strip()
 
-    query = AuditLog.query
-    if action:
-        query = query.filter(AuditLog.action == action)
-
-    size = 50
-    total = query.count()
-    pages = max(1, (total + size - 1) // size)
-    page = min(page, pages)
-    rows = (
-        query.order_by(AuditLog.id.desc())
-        .limit(size)
-        .offset((page - 1) * size)
-        .all()
-    )
-
+    rows, total, page, pages = audit_service.list_entries(action, page)
     actions = [
         {"value": value, "label": ACTION_LABELS.get(value, value)}
-        for (value,) in db.session.query(AuditLog.action).distinct().order_by(AuditLog.action).all()
+        for value in audit_service.action_values()
     ]
 
     return render_template(

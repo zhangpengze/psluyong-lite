@@ -24,12 +24,23 @@ services:
     environment:
       DATA_DIR: /app/data
       TZ: ${TZ:-Asia/Shanghai}
+      # 成品图镜像目录（容器内路径）。把 NAS 第二块盘/另一台共享目录挂到
+      # /app/mirror，这里就填 /app/mirror；留空 = 不镜像（盘坏即丢图）。
+      IMAGES_MIRROR_DIR: ${IMAGES_MIRROR_DIR:-}
     # 让容器内可以解析 host.docker.internal → 宿主机网关，
     # 从而访问宿主机 13000 上跑的 NapCat HTTP 服务（Linux 上默认没有这个域名）
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      # 图片镜像目标（可选，配了 IMAGES_MIRROR_DIR=/app/mirror 才需要）
+      # - /volume2/backup/psluyong-images:/app/mirror
+    # 容器日志限流：默认 json-file 无限增长会吃满 NAS 系统盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       # 镜像里没装 curl（精简版 Dockerfile 不跑 apt），用 python 自带 urllib 探活
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=3).status==200 else 1)"]

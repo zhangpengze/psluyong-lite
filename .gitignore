@@ -27,3 +27,8 @@ logs/
 # 这里兜住 --out 指到仓库内、或手动把 data/ 拷到 deploy 下的情况）
 psluyong-lite-nas-*.zip
 deploy/nas/data/
+
+# 覆盖率产物（pytest-cov）
+.coverage
+.coverage.*
+htmlcov/

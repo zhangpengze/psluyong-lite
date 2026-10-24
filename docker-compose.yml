@@ -19,9 +19,21 @@ services:
       DATA_DIR: /app/data
       TZ: ${TZ:-Asia/Shanghai}
       ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-1}
+      # 成品图镜像目录（容器内路径）：把 NAS 上的另一块盘/共享目录挂到 /app/mirror，
+      # 这里填 /app/mirror。留空 = 不镜像（盘坏即丢图，启动日志会 warning）。
+      IMAGES_MIRROR_DIR: ${IMAGES_MIRROR_DIR:-}
     volumes:
       # NAS 共享文件夹挂到这里，重装容器不丢数据
       - ./server/data:/app/data
+      # 图片镜像目标：宿主机第二块盘 / 另一台 NAS 的挂载点
+      # - /volume2/backup/psluyong-images:/app/mirror
+    # 容器日志必须限流：json-file 默认无限增长，NAS 系统盘写满会连带
+    # 其它容器一起挂，而且没有任何提示。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health/ready"]
       interval: 30s

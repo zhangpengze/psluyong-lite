@@ -77,6 +77,67 @@ docker exec psluyong-lite python -m server.backup --list
 
 - 兜底：直接打包 `server/data` 目录即可，无需导库。
 
+#### 3.1 图片必须有第二份（重要）
+
+数据库每天有热备，但成品图只在 `server/data/images` 这一块盘上。盘坏、误删目录、
+误格式化，图就全没了——而图才是员工一天的工作成果，库里的只是一串路径。
+
+做法：在 NAS 上建一个备份共享目录（最好在另一块盘），挂进容器，然后配两项：
+
+```yaml
+# docker-compose.yml
+volumes:
+  - ./data:/app/data
+  - /volume2/backup/psluyong-images:/app/mirror   # 第二块盘
+environment:
+  IMAGES_MIRROR_DIR: /app/mirror
+```
+
+```bash
+# .env
+IMAGES_MIRROR_DIR=/app/mirror
+DISK_ALERT_GB=20          # 图片占用超过这个值推群提醒
+```
+
+每天 03:30 的夜间任务会做增量镜像：只拷新增/变化的文件（按大小比对，不靠时间戳），
+10 个人一天几十张图是秒级完成。手动执行：
+
+```bash
+docker exec psluyong-lite python -m server.backup --mirror-images
+```
+
+未配置时启动日志会打一条 warning——不是错误，但意味着"盘坏即全丢"。
+
+输出会列出缺失记录（record id / 日期 / 员工 / 期望路径）和前 50 个孤儿文件；
+缺失原图时退出码为 1，方便挂到外部监控上。
+
+#### 3.2 容器日志限流
+
+compose 里已经写好 `logging: max-size 10m / max-file 3`。缺了这段，json-file 驱动
+会无限增长，NAS 系统盘被写满会连带其它容器一起挂，而且没有任何提示。
+
+#### 3.3 运维告警
+
+以下四类问题原来只写日志（日志一轮转就消失），现在会推到 `REPORT_GROUP_ID`：
+
+| 场景 | 触发 |
+|---|---|
+| 数据库备份失败 | 夜间任务异常 |
+| 图片镜像失败 | 单张复制失败或目录不可写 |
+| 图片占用超阈值 | 超过 `DISK_ALERT_GB` |
+| 定时日报推送失败 | 配了 NapCat 但推送未成功 |
+
+```bash
+# .env
+ALERT_ON_OPS_FAILURE=1    # 关掉就只记日志
+```
+
+运维告警与"员工录用失败"是两条独立通道，各自的节流互不影响（运维 5 分钟，
+失败告警按 `ALERT_MIN_INTERVAL_S`）。
+
+另外建议用 NAS 自带监控或 Uptime Kuma 盯 `http://NAS的IP:8080/health/ready`：
+容器整个挂掉时，服务内部的告警也发不出去。
+
 ### 4. 从 Windows 开发机迁移数据（可选）
 
 全新部署跳过本节。如果开发机上已有记录和图片要带到 NAS：
@@ -335,6 +396,9 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 - [ ] 至少上传 1 个模板，并在客户端成功出过 1 张图
 - [ ] 员工机器的 PS 版本已确认（不同版本 COM 行为略有差异）
 - [ ] `server/data` 已纳入 NAS 定时备份
+- [ ] **图片有第二份**：`IMAGES_MIRROR_DIR` 已配（或在存储空间开了快照）
+- [ ] 容器日志已限流（compose 里的 `logging` 段），`docker logs` 不会无限长
+- [ ] 运维告警能收到：手动删掉一个备份文件后跑一次 `python -m server.backup` 验证
 - [ ] `PRAGMA journal_mode` 输出为 `wal`（data 目录在网络盘上时改为 `DELETE`）
 - [ ] 后台「操作日志」页能看到本次登录记录
 - [ ] `ENABLE_SCHEDULER=1`，且「每日日报」页能看到当天日报

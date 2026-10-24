@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               803 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               845 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -44,6 +44,9 @@ tests/               803 个用例，覆盖 API、权限、去重与失败重试
                      内网请求绕开系统代理、上线预检脚本三态判据、
                      补传成品图缓冲（清理输出目录不丢图/副本过期清理/死信带走图）、
                      补传并发互斥（多窗口不会重复提交、失败计数不重复累加）、
+                     硬超时看门狗（无人轮询也收任务/超时不报成功）、
+                     关文档失败的警告通路、父进程看门狗与端口占用探针、
+                     Rust 侧源码守卫（CRLF 归一/变量名跨语言一致）、
                      员工手册与界面文案同步
 ```
 
@@ -123,7 +126,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（803 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（845 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -131,8 +134,14 @@ cd client && npm run typecheck && npm test      # 前端类型检查与单测
 
 ```bash
 cd client
-npm test            # vitest：日期分组、toast 去重、草稿存取、哪个窗口才补传
+npm test            # vitest 56 个：日期分组、toast 去重、草稿存取、哪个窗口才补传
 npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
+```
+
+Rust 外壳（CI 里没有 Rust 工具链，本地改 `src-tauri` 后请手动跑）：
+
+```bash
+cd client/src-tauri && cargo test --lib          # 13 个：贴边方向/多屏/单实例/父进程 pid
 ```
 
 ## 生成链路
@@ -197,6 +206,11 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 | `/open-folder` 能打开任意目录 | 白名单：只许输出目录、模板目录、数据目录，路径 `resolve()` 后按 `os.sep` 边界比对 | sidecar 绑 127.0.0.1，任何能发 POST 的东西（哪怕一段网页 fetch）都能借它把任意目录弹到员工屏幕上。用 `normcase` 处理大小写，用 `base + os.sep` 避免 `期刊录用2` 被当成 `期刊录用` 的子目录 |
 | 补传时成品图被清理掉了，仍建了一条无图记录 | 入队时把图复制进 `%APPDATA%\psluyong-lite\pending_images`，补传优先用副本；缓冲和原目录都找不到就**不提交**、整条转死信（图跟着进 `dead/`） | 队列原来只存图片**路径**：员工整理输出目录后，补传时 `api_client` 发现文件不在就不带文件提交，服务端落一条没图的记录，界面上还写着"已同步"——数据看着完整，实际废了，没人会发现。副本按天留 7 天，成功落地的记录副本立刻删掉 |
 | 三个窗口同时补传，同一批记录提交两三遍 | 只有主窗（`ownsQueue`）补传与拉今日数；sidecar 那边一把非阻塞锁（`queue_flush`），正在补传时第二个请求直接返回当前积压 | 主窗/记录窗/设置窗是三个独立 WebView，各跑一份 App.vue，启动时全都 `flushQueue`。成功记录有服务端唯一索引兜底（409），但 5xx 的记录会被两边各记一次失败——`MAX_ATTEMPTS` 提前用完，本该还能重试的记录被提前丢进死信，这是真丢数据；两个请求还会同时改写同一个 json |
+| PS 卡死且没人轮询时，busy 锁永远不放 | 硬超时 300 秒（`sidecar/timeout.py`）：轮询路径和后台 reaper 共用同一判据，超时先写 `timeout` 终态再杀 worker；结算层把 `timeout` 映射成"结果未知"而不是 failed | 员工生成完就关窗口、前端崩了、员工走开——这三种情况下没人调 `/status`，旧实现只有"点取消"一个出口。于是之后每一次生成都撞 409「上一次还没结束」，员工只能重启软件。判据只看总耗时**不看心跳**：worker 卡在 COM 里时 pywin32 会释放 GIL，心跳照常每 2 秒跳，看起来一切正常 |
+| 超时的时候图可能已经导出来了 | 超时终态一律 `success=false`，文案写"请到输出目录确认这次有没有生成图片"；上报走 `uncertain`，不进 failed | 这一刻真相未知：报成功就是假成功（最贵），报失败会让员工重做一张本来做好的图并污染失败率。说清"去目录看一眼"是唯一诚实的做法 |
+| PS 里的文档越叠越多，最后报暂存盘不足 | 关文档的失败不再 `logger.debug("（可忽略）")`：`close_document` 返回原因，runner 把它挂到本次结果的 warnings 上 | 每张图打开一个模板文档，正常靠 `close` 收尾。之前关失败被完全吞掉，文档就留在 PS 里，一天几十张之后 PS 报暂存盘不足/变慢，而日志里一个字都没有——员工只知道"越用越卡" |
+| Tauri 被强杀后 sidecar 变成僵尸，前端连的是上一轮那个 | Tauri 启动 sidecar 时写 `PSLUYONG_PARENT_PID`；sidecar 和 worker 各自每 2 秒 `OpenProcess`+`WaitForSingleObject` 探一次，爹没了就 `os._exit` | 僵尸 sidecar 一直占着 8765，新 sidecar 绑不上端口、stdout 又是 `Stdio::null()`，静默死掉；前端于是连到旧进程：busy 永远 true、配置是旧的、日志里没有任何线索。Windows 上不能用 `os.kill(pid, 0)` 判活——任何非 CTRL_C 的信号都会**杀掉**对方 |
+| 8765 被占时两次启动"看起来都成功" | 启动前裸 `bind` 探一次端口（`probe_port`），被占就写清"很可能是上一次的 sidecar 还活着"并 `SystemExit(1)` | Windows 上 werkzeug 开了 `SO_REUSEADDR`，端口被占时 `app.run` 有可能绑得上——两个 sidecar 同时活着，请求落到谁手里看运气 |
 
 ## 部署
 

@@ -7,6 +7,7 @@ worker 能把终态落盘；用真实子进程验证 sidecar<->worker 的文件�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -279,3 +280,143 @@ def test_cancel_then_start_again(tmp_path: Path):
             return
         time.sleep(0.2)
     raise AssertionError("取消后重新提交的任务没有出终态")
+
+
+# ========== 硬超时看门狗（item 16）==========
+# 旧行为：只要 worker 进程还活着，status() 就永远返回 running。PS 卡在模态框上
+# 时那个进程永远活着 —— busy 锁永不释放，之后每一次生成都撞 409「上一次还没
+# 结束」。心跳在这里帮不上忙：worker 卡在 COM 调用里时 pywin32 会释放 GIL，
+# 心跳线程照常每 2 秒 touch，看起来一切正常。
+
+
+def test_should_abort_只看总耗时():
+    from client.sidecar.executor import HARD_TIMEOUT_S, should_abort
+
+    assert should_abort(0) is False
+    assert should_abort(HARD_TIMEOUT_S - 1) is False
+    assert should_abort(HARD_TIMEOUT_S) is True
+    assert should_abort(HARD_TIMEOUT_S + 60) is True
+    # 阈值可传：测试和将来调参都不用改全局
+    assert should_abort(10, limit_s=10) is True
+    assert should_abort(9.9, limit_s=10) is False
+
+
+def test_timeout_final_绝不报成功():
+    """图有可能已经导出来了，只是 PS 卡在收尾——所以只能判"结果未知"，
+    并且文案必须让员工自己去输出目录看一眼"""
+    from client.sidecar.executor import timeout_final
+
+    final = timeout_final(300_000)
+
+    assert final["state"] == "timeout"
+    assert final["success"] is False
+    assert final["image_path"] == ""
+    assert "输出目录" in final["message"]
+    assert final["duration_ms"] == 300_000
+    assert any("暂存盘" in w for w in final["warnings"]), "要提醒文档越叠越多这件事"
+
+
+def _stuck_task(ex: Executor, tmp_path: Path) -> tuple[str, subprocess.Popen]:
+    """拉一个永不结束的 worker，然后把开始时间往前拨到超时线外"""
+    spawned: list[subprocess.Popen] = []
+    ex._spawn_worker = lambda task_dir: _sleeper(spawned)  # type: ignore[method-assign]
+    task_id = ex.start(_make_params(tmp_path))
+    return task_id, spawned[0]
+
+
+def _sleeper(spawned: list) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned.append(proc)
+    return proc
+
+
+def test_status_aborts_when_hard_timeout(tmp_path: Path):
+    """轮询路径：超时就中止、落终态、杀 worker、放锁"""
+    import client.sidecar.executor as executor_mod
+
+    ex = Executor()
+    task_id, proc = _stuck_task(ex, tmp_path)
+    task_dir: Path = ex._tasks[task_id]["dir"]
+    try:
+        ex._tasks[task_id]["started"] = time.monotonic() - executor_mod.HARD_TIMEOUT_S - 1
+
+        status = ex.status(task_id)
+
+        assert status["finished"] is True
+        assert status["state"] == "timeout"
+        assert status["success"] is False
+        assert "输出目录" in status["message"]
+        assert proc.wait(timeout=10) is not None, "worker 必须真的被杀掉"
+        assert ex.running_task() is None, "锁必须放掉，否则下一次生成永远 409"
+        # 终态要落盘：客户端可能已经关了，下次启动要能读出同一份结论
+        assert read_json(task_dir / "status.json")["state"] == "timeout"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_sweep_aborts_hard_timeout_without_any_polling(tmp_path: Path):
+    """没人轮询时也要中止：员工关了窗口、前端死了，busy 不能永远挂着"""
+    import client.sidecar.executor as executor_mod
+
+    ex = Executor()
+    task_id, proc = _stuck_task(ex, tmp_path)
+    try:
+        task = ex._tasks[task_id]
+        task["started"] = time.monotonic() - executor_mod.HARD_TIMEOUT_S - 1
+
+        ex._sweep_once()  # 就是 reaper 每 5 秒做的那件事
+
+        assert proc.wait(timeout=10) is not None
+        assert ex.running_task() is None
+        assert read_json(task["dir"] / "status.json")["state"] == "timeout"
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_sweep_leaves_fresh_task_alone(tmp_path: Path):
+    """刚开始跑的任务不能被巡查误杀"""
+    ex = Executor()
+    task_id, proc = _stuck_task(ex, tmp_path)
+    try:
+        ex._sweep_once()
+
+        assert proc.poll() is None, "3 秒的任务不该被当成超时"
+        assert ex.running_task() == task_id
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_worker_is_told_to_watch_the_sidecar_not_tauri(tmp_path: Path, monkeypatch):
+    """env 从 Tauri 继承下来那个 pid 是**爷爷**的，必须覆盖成 sidecar 自己的：
+    worker 要盯的是"我爹还在不在"，爷爷死没死跟它没关系（爹会给它收尸）"""
+    import client.sidecar.executor as executor_mod
+
+    seen: dict = {}
+
+    class FakePopen:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        seen["env"] = dict(kwargs.get("env") or {})
+        return FakePopen()
+
+    monkeypatch.setenv("PSLUYONG_PARENT_PID", "999999")  # 假装是 Tauri 传下来的
+    monkeypatch.setattr(executor_mod.subprocess, "Popen", fake_popen)
+
+    ex = Executor()
+    ex.start(_make_params(tmp_path))
+
+    assert seen["env"]["PSLUYONG_PARENT_PID"] == str(os.getpid())

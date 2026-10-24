@@ -4,8 +4,9 @@
 真正的 COM 调用在 worker 子进程里（见 worker.py）。
 
 状态判定：
-    status.json 存在                -> 终态（done/error）
-    进程还在 + 心跳新鲜             -> running
+    status.json 存在                -> 终态（done/error/timeout）
+    进程还在 + 没到硬超时           -> running
+    进程还在 + 超过硬超时           -> timeout（本进程主动中止，见 HARD_TIMEOUT_S）
     进程退了但终态没写出来           -> uncertain（PS 硬崩溃，结果未知）
                                        这时宁可让员工去输出目录看一眼，
                                        也绝不报"成功"——假成功比失败更贵。
@@ -22,6 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import parent_watch
+from .timeout import HARD_TIMEOUT_S, should_abort, timeout_final  # noqa: F401
 from .worker import read_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -115,12 +118,15 @@ class Executor:
 
         code = popen.poll()
         if code is None:
+            elapsed_s = time.monotonic() - task["started"]
+            if should_abort(elapsed_s):
+                return self._abort_timeout(task_id, task)
             heartbeat = task_dir / "heartbeat"
             age = time.monotonic() - heartbeat.stat().st_mtime if heartbeat.exists() else 999.0
             return {
                 "state": "running",
                 "finished": False,
-                "elapsed_s": int(time.monotonic() - task["started"]),
+                "elapsed_s": int(elapsed_s),
                 "heartbeat_stale": age > HEARTBEAT_STALE_S,
             }
 
@@ -190,8 +196,31 @@ class Executor:
 
     # ---- 内部 ----
 
+    def _abort_timeout(self, task_id: str, task: dict) -> dict:
+        """硬超时：写终态 -> 杀 worker -> 放锁。
+
+        顺序和 cancel() 一样不能反：先杀进程的话，status() 会先看到进程消失、
+        又读不到 status.json，判成 uncertain（"结果未知"），员工被告知的话术
+        就变成了"可能已经生成了一张图"——我们明明知道是超时。
+        """
+        task_dir: Path = task["dir"]
+        elapsed_ms = int((time.monotonic() - task["started"]) * 1000)
+        final = timeout_final(elapsed_ms)
+        write_json_atomic(task_dir / "status.json", final)
+        try:
+            task["popen"].kill()
+        except OSError as e:
+            logger.warning("超时后终止 worker 失败 task=%s: %s", task_id, e)
+        logger.error("任务硬超时 task=%s，已跑 %.0f 秒，强制中止", task_id, elapsed_ms / 1000)
+        self._release(task_id)
+        return _map_final(final)
+
     def _ensure_reaper(self) -> None:
-        """后台线程兜底：客户端关掉没人轮询时，也要把已结束任务占用的锁放掉"""
+        """后台线程兜底：客户端关掉没人轮询时，也要把已结束任务占用的锁放掉。
+
+        硬超时也在这里判：员工关了窗口、前端死了，就没人调 status()，
+        光靠轮询路径的话 busy 锁会永远挂着。
+        """
         if self._reaper_started:
             return
         self._reaper_started = True
@@ -199,17 +228,34 @@ class Executor:
         def reap() -> None:
             while True:
                 time.sleep(5)
-                for task_id, task in list(self._tasks.items()):
-                    popen: subprocess.Popen = task["popen"]
-                    task_dir: Path = task["dir"]
-                    if popen.poll() is not None and read_json(task_dir / "status.json") is not None:
-                        self._release(task_id)
+                self._sweep_once()
 
         threading.Thread(target=reap, name="executor-reaper", daemon=True).start()
+
+    def _sweep_once(self) -> None:
+        """巡查一轮：已结束的放锁，跑太久的强制中止。
+
+        单独一个方法是为了能测——"没人轮询时 busy 也要释放"正是这一层要保证的
+        事，而它藏在一条 `while True: sleep(5)` 里，不拆出来就只能靠等 5 秒。
+        """
+        for task_id, task in list(self._tasks.items()):
+            popen: subprocess.Popen = task["popen"]
+            task_dir: Path = task["dir"]
+            if popen.poll() is None:
+                if should_abort(time.monotonic() - task["started"]):
+                    self._abort_timeout(task_id, task)
+                continue
+            if read_json(task_dir / "status.json") is not None:
+                self._release(task_id)
 
     def _spawn_worker(self, task_dir: Path) -> subprocess.Popen:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        # worker 盯**我们**：sidecar 一死（正常退出时 Rust 只 kill 一级子进程），
+        # worker 就是孤儿，还抱着 ps.lock 和 PS 的 COM，下一次生成要等 10 秒
+        # 抢锁失败并报"Photoshop 正被另一个任务占用"。
+        # 必须显式覆盖：env 是从 sidecar 继承的，里面那个 pid 是 Tauri 的。
+        env[parent_watch.PARENT_PID_ENV] = str(os.getpid())
         if getattr(sys, "frozen", False):
             # PyInstaller 打包后没有可 import 的 client 包，走 exe 自身入口
             cmd = [sys.executable, "--run-worker", str(task_dir)]

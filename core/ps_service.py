@@ -75,7 +75,7 @@ class PSService:
             try:
                 self._connector.close_document(self._current_document)
             except Exception as e:  # noqa: BLE001 - 断开链路不允许抛错
-                logger.debug("关闭文档时出错（可忽略）: %s", e)
+                logger.warning("断开时关闭文档失败（PS 里可能还开着）: %s", e)
             self._current_document = None
         self._connector.app = None
 
@@ -96,14 +96,27 @@ class PSService:
             logger.error("打开文档失败: %s", e)
             return False, f"打开文档失败: {e}"
 
-    def close_document(self, save_changes: bool = False) -> None:
+    def close_document(self, save_changes: bool = False) -> str:
+        """关闭当前文档。返回空串表示关掉了，否则是失败原因。
+
+        以前失败只 `logger.debug` 一句"（可忽略）"然后置空引用。可它一点都不可
+        忽略：PS 卡在对话框/被占用时 Close() 会抛，文档就留在 PS 里，一次一张，
+        攒到十几张之后员工看到的是"暂存盘不足"——一个跟他做的事毫无关系的报错，
+        worker.log 里只有一行 debug。现在返回原因，由 runner 挂到**这次的结果**
+        上，员工当场就能看到"PS 里还留着一个没关的模板"。
+        """
         if not self._current_document:
-            return
+            return ""
         try:
             self._current_document.Close(1 if save_changes else 2)
-        except Exception as e:  # noqa: BLE001 - 关闭失败不应中断上层清理
-            logger.debug("关闭文档时出错（可忽略）: %s", e)
+            return ""
+        except Exception as e:  # noqa: BLE001 - 关闭失败不能中断上层清理
+            message = f"关闭 Photoshop 文档失败：{e}"
+            logger.warning("%s（这个模板的文档可能还开在 PS 里）", message)
+            return message
         finally:
+            # 引用照旧清空：留着它，下次 open_document 会去关一个可能已经失效的
+            # COM 对象，把真正的报错盖成"关闭文档失败"。
             self._current_document = None
 
     def set_display_dialogs(self, mode: int = 3) -> None:

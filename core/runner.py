@@ -110,10 +110,16 @@ def _unique_path(base: Path, stem: str, suffix: str) -> Path:
 def run_export(req: ExportRequest) -> ExportResult:
     """执行一次生成。不抛异常，失败通过 ExportResult.message 返回。"""
     started = time.monotonic()
+    # 关文档失败要把警告挂到**这次**的结果上。done() 一被调用就 return 了，
+    # finally 里改不到返回值，所以留个引用：员工看到"生成成功"却不知道
+    # PS 里还开着一个模板，攒够十几张就变成"暂存盘不足"。
+    outcome: list[ExportResult] = []
 
     def done(success: bool, **kwargs) -> ExportResult:
         kwargs.setdefault("duration_ms", int((time.monotonic() - started) * 1000))
-        return ExportResult(success=success, **kwargs)
+        result = ExportResult(success=success, **kwargs)
+        outcome.append(result)
+        return result
 
     template_path = Path(req.template_path)
     if not template_path.exists():
@@ -212,8 +218,14 @@ def run_export(req: ExportRequest) -> ExportResult:
         return done(True, image_path=final_path, warnings=warnings)
 
     finally:
-        # 无论成功失败都要关掉文档，否则下次打开会叠文档、PS 内存越用越大
-        service.close_document(save_changes=False)
+        # 无论成功失败都要关掉文档，否则下次打开会叠文档、PS 内存越用越大。
+        # 关不掉要说出来：这是"暂存盘不足"的唯一成因，而它看起来跟生成毫无关系
+        close_error = service.close_document(save_changes=False)
+        if close_error and outcome:
+            outcome[-1].warnings.append(
+                f"{close_error}。它不会影响这张图，但请手动关掉 PS 里那个模板，"
+                "否则文档会越叠越多，最后报暂存盘不足"
+            )
 
 
 def _discard(path: Path) -> None:

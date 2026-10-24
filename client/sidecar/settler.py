@@ -58,6 +58,17 @@ def _build_payload(
         payload = {"ok": False, "cancelled": True, "error": status.get("message", "已取消")}
     elif state == "uncertain":
         payload = {"ok": False, "error": status.get("message", "结果未知"), "uncertain": True}
+    elif state == "timeout":
+        # 硬超时：和 uncertain 同一类"我们不知道结果"——图有可能已经导出来了，
+        # 只是 PS 卡在收尾那一步。报成 failed 会让失败率里多一条可能假的数据，
+        # 而真正需要员工做的是去输出目录看一眼。
+        payload = {
+            "ok": False,
+            "error": status.get("message", "生成超时已中止"),
+            "uncertain": True,
+            "timeout": True,
+            "warnings": list(status.get("warnings") or []),
+        }
     elif state == "error" or not status.get("success"):
         # 异常退出（worker 抛错）和"跑完了但没成功"都要入库：
         # 前者以前没人报，客户端整体坏掉时后台一片安静

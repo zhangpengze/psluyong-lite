@@ -154,7 +154,7 @@ def test_running_task_is_left_alone(data_dir, cfg):
 
 
 # ========== 不该上报的三种终态 ==========
-@pytest.mark.parametrize("state", ["cancelled", "uncertain"])
+@pytest.mark.parametrize("state", ["cancelled", "uncertain", "timeout"])
 def test_cancelled_and_uncertain_are_marked_but_not_reported(data_dir, cfg, state):
     """取消是"不想等了"、崩溃是"不知道成没成"，都不能算失败记录"""
     task_dir = make_task(data_dir, state=state, success=False, message="说明")
@@ -165,6 +165,23 @@ def test_cancelled_and_uncertain_are_marked_but_not_reported(data_dir, cfg, stat
     assert fake.submitted == []
     assert result_of(task_dir) is not None, "必须留标记，否则每一轮扫描都会再看一遍"
     assert payload[state] is True
+
+
+def test_hard_timeout_keeps_the_ps_warning(data_dir, cfg):
+    """硬超时的提醒（PS 里可能留着没关的文档）必须传到界面上——
+
+    那条提醒是"暂存盘不足"的唯一线索，丢了就等于没修。
+    超时不报 failed：图可能已经导出来了，报失败会让失败率多一条假数据。
+    """
+    warn = "生成被强制中止：Photoshop 里可能留下这个模板的未保存文档"
+    make_task(data_dir, state="timeout", success=False, message="等了 5 分钟还没结束", warnings=[warn])
+    fake = FakeClient()
+
+    payload = settler.settle_task(TASK_ID, lambda c: fake, cfg=cfg)
+
+    assert payload["uncertain"] is True
+    assert fake.submitted == []
+    assert payload["warnings"] == [warn]
 
 
 def test_worker_exception_is_reported_as_failed(data_dir, cfg):

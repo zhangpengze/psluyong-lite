@@ -89,6 +89,23 @@ const SLIDE_MS: u64 = 150;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 把本进程 pid 传给子进程：父进程一死，子进程自己退出。
+///
+/// 不传的后果：Tauri 被任务管理器强杀后 sidecar 还在跑、还占着 8765，下次启动的
+/// sidecar 绑不上端口、静默死在 DEVNULL，前端连到的是那个僵尸（busy/配置全是上一
+/// 轮的）。约定与 Python 侧 `client/sidecar/parent_watch.py` 的
+/// `PARENT_PID_ENV` 必须一致。
+const PARENT_PID_ENV: &str = "PSLUYONG_PARENT_PID";
+
+fn parent_pid_env() -> (String, String) {
+    (PARENT_PID_ENV.to_string(), std::process::id().to_string())
+}
+
+fn tag_parent_pid(cmd: &mut Command) {
+    let (key, value) = parent_pid_env();
+    cmd.env(key, value);
+}
+
 fn command_for(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
@@ -100,7 +117,15 @@ fn command_for(program: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
+/// 找 sidecar 可执行文件/命令。**所有返回路径都经过 tag_parent_pid**，
+/// 分散在调用点去加的话早晚漏一处。
 fn resolve_sidecar(app: &tauri::AppHandle) -> Option<Command> {
+    let mut cmd = resolve_sidecar_raw(app)?;
+    tag_parent_pid(&mut cmd);
+    Some(cmd)
+}
+
+fn resolve_sidecar_raw(app: &tauri::AppHandle) -> Option<Command> {
     // 1) 环境变量直指可执行文件（打包后优先）
     if let Ok(exe) = std::env::var("PSLUYONG_SIDECAR_EXE") {
         let path = PathBuf::from(exe);
@@ -1038,7 +1063,7 @@ mod instance_tests {
     #[test]
     fn 双开监听器不许调到托盘那个切换() {
         // 别的地方改不回来：这一条盯的是"用错函数"，纯逻辑测试看不出来
-        let src = include_str!("lib.rs");
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
         let bad = format!("toggle_main_window(&{})", "app2");
         assert!(
             !src.contains(&bad),
@@ -1046,5 +1071,42 @@ mod instance_tests {
         );
         let good = format!("show_main_window(&{})", "app2");
         assert!(src.contains(&good), "第二个实例应当调用 show_main_window");
+    }
+}
+
+// ==================== 父进程 pid 必须传下去 ====================
+// sidecar 靠这个 pid 判断"我的爹还在不在"。漏传的话它永远不会自己退出：
+// Tauri 被强杀后僵尸 sidecar 一直占着 8765，下次启动的新 sidecar 绑不上端口、
+// 静默死在 DEVNULL，前端连到的是上一轮那个（busy 永远 true）。
+#[cfg(test)]
+mod parent_pid_tests {
+    use super::*;
+
+    #[test]
+    fn 环境变量名与_python_侧一致() {
+        // Python: client/sidecar/parent_watch.py 的 PARENT_PID_ENV
+        assert_eq!(parent_pid_env().0, "PSLUYONG_PARENT_PID");
+    }
+
+    #[test]
+    fn pid_是当前进程且合法() {
+        let pid: u32 = parent_pid_env().1.parse().expect("pid 必须能解析成数字");
+        assert!(pid > 0);
+        assert_eq!(pid, std::process::id());
+    }
+
+    #[test]
+    fn 找_sidecar_的地方必须带上_pid() {
+        // "忘了调 tag_parent_pid"是这类接线的典型错法，逻辑测试看不出来。
+        // needle 里带上换行和缩进：否则断言文案自己就把 needle 喂给了 contains
+        // （踩过一次：文案里写了那句调用，守卫于是永远为真）
+        //
+        // 还要先统一行尾：这个文件是 CRLF，needle 里写 \n 而磁盘上是 \r\n，
+        // contains 永远为假 —— 守卫会一直红（或者反过来永远绿），比没有更糟。
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let call = format!("\n    {}(&mut cmd);\n", "tag_parent_pid");
+        assert!(src.contains(&call), "resolve_sidecar 包装层漏了 pid 传递");
+        let wrapper = format!("resolve_sidecar_raw({})?", "app");
+        assert!(src.contains(&wrapper), "所有返回路径都要经过同一个包装函数");
     }
 }

@@ -26,6 +26,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import parent_watch
+
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 2.0
@@ -111,6 +113,9 @@ def run(task_dir: Path) -> None:
     )
     attach_file_logger("worker.log")
     task_dir = Path(task_dir)
+    # sidecar（我们爹）一死就退出：否则孤儿 worker 还抱着 ps.lock 和 PS 的 COM，
+    # 下一次生成要等 10 秒抢锁失败并报"Photoshop 正被另一个任务占用"。
+    parent_watch.start()
     # PS 硬崩溃时 Python 拦不到，faulthandler 把现场写进文件，事后有据可查
     crash_log = open(task_dir / "crash.log", "w", encoding="utf-8")
     faulthandler.enable(crash_log)

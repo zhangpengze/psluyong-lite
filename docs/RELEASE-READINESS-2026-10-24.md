@@ -130,7 +130,13 @@
 > 把逻辑改回旧行为，新用例必须变红，改回来必须变绿。变异数写在各项标题里。
 > **第三批已修 3 项**（11、13、18 的 open-folder 部分），同样的交付标准。
 > **第四批已修 2 项**（17、14）：都是"静默丢数据 / 污染统计"一类，同样每条都有变异验证。
-> 其余 7 项（4、5、6、7、8、12、16）外加 18 的 `task_id` 校验，仍按原计划排在灰度期处理。
+> **第五批已修 2 项**（16、12）：都是"软件看着在跑、实际什么都没干"一类。
+> 16 是 PS 卡死时员工只能关软件、PS 里文档越叠越多；12 是 8765 被占时新 sidecar 静默死在
+> DEVNULL、前端连上僵尸进程。这一批变异 15/15 全红（含 Rust 那条——注意 `cargo test`
+> 失败返回 **101** 不是 1，按 `rc!=0` 判会把"变异把代码写坏了"也算成"抓到了"）。
+> 另外补了 `tests/test_rust_source_guards.py`：CI 里没有 cargo 步骤，`lib.rs` 的
+> `include_str!` 守卫在流水线中等同于不存在，所以这三件事在 Python 侧再钉一遍。
+> 其余 5 项（4、5、6、7、8）外加 18 的 `task_id` 校验、12 的 Job Object 兜底，仍按原计划排在灰度期处理。
 
 ### 服务端
 1. ✅ **已修**（变异 2/2 全红）**状态卡一行异常打挂整张卡**：`status.py:112-123` `_database_row` 直接 `Record.query...count()`，**没有 try/except**；同文件 `_dir_usage`/`_backup_row` 都做了降级。DB 一锁（WAL 下高峰期可能）→ `/api/v1/stats/overview` 与仪表盘一起 500。
@@ -153,7 +159,12 @@
     → 两个表单必填字段对应的替换规则标 `required=True`，未命中即判失败并**点名是哪个占位符**；可选规则仍只做提醒（文案保持原样）。同时把"正则规则无效"从"模板里找不到占位符"里摘出来单独报——否则员工会跑去改模板，而真正错的是配置。流程抽到 `core/ps_rules.py` + `core/ps_replace_flow.py`（`ps_service.py` 因此回到 211 行，守住 300 行闸门）。用例 `tests/test_ps_rules.py` + `tests/test_ps_service.py`。
 11. ✅ **已修**（变异 2/2 全红）**单实例开关是 toggle**（`lib.rs:746-753`）：主窗已显示时双击桌面图标 → 窗口被**隐藏**，员工以为没启动。建议第二个实例只 `show + focus`。
     → 新增 `show_main_window`，步骤抽成纯函数 `show_steps(minimized, visible)`：`minimized` 才还原、`!visible` 才 `show`、**最后一定聚焦**，任何分支都不隐藏。托盘菜单的 toggle 语义保持不变（那个菜单本来就叫「显示/隐藏主窗」）。窗口操作要真窗口才能测，所以沿用项目里 `nearest_side` 的老办法——把决策抽成纯函数验，另加一条守卫：`include_str!("lib.rs")` 断言第二个实例**没有**调到 `toggle_main_window`（这类"用错函数"光看逻辑测不出来）。用例 `lib.rs::instance_tests`（6 条）。
-12. **僵尸 sidecar / 端口占用**：`lib.rs:873-885` 只 kill 一级子进程，worker 是孙进程；sidecar 无父进程看门狗；8765 被占时新 sidecar 静默死在 DEVNULL，前端仍连上僵尸 → `busy` 可能永远 true、按钮永远 409。建议 Job Object（`KILL_ON_JOB_CLOSE`）+ 父 PID 看门狗 + 端口失败可见化。
+12. ✅ **已修**（变异 4/4 全红）**僵尸 sidecar / 端口占用**：`lib.rs:873-885` 只 kill 一级子进程，worker 是孙进程；sidecar 无父进程看门狗；8765 被占时新 sidecar 静默死在 DEVNULL，前端仍连上僵尸 → `busy` 可能永远 true、按钮永远 409。
+    → **两层看门狗**：Tauri 启动 sidecar 时写 `PSLUYONG_PARENT_PID`（`lib.rs` 的 `tag_parent_pid` 包在 `resolve_sidecar` 包装层里，所有返回路径都过它）；`sidecar/parent_watch.py` 每 2 秒探一次，爹没了就 `os._exit`（COM 卡死时 atexit/logging 都可能跟着挂住，所以不走优雅退出）；worker 子进程同样起一个（`_spawn_worker` 里**覆盖**继承来的 Tauri pid，否则它盯的是"爷爷"）。
+    → **Windows 上不能 `os.kill(pid, 0)`**：除 `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` 外任何信号都会**杀掉**目标进程——判活变谋杀，用例 `test_alive_does_not_kill_the_target` 就是拿真子进程盯这一条。改用 `OpenProcess(SYNCHRONIZE|QUERY_LIMITED)` + `WaitForSingleObject(h, 0) == WAIT_TIMEOUT`。
+    → **端口占用可见化**：启动前先裸 `bind` 一次（`server.probe_port`）。不能在 `SO_REUSEADDR` 的套接字上探——Windows 下那样连被占的端口都能绑上（werkzeug 正是这么设的），两个 sidecar 会同时活着；裸 bind 则老老实实报 10048。被占时写清"很可能是上一次的 sidecar 还活着"并 `SystemExit(1)`，`app.run` 自己抛的 OSError 也兜住再退。
+    → 用例 `tests/test_parent_watch.py`（20 条）+ `tests/test_sidecar_startup.py`（8 条）+ `lib.rs::parent_pid_tests`（3 条）。
+    → ⚠️ **Job Object（`KILL_ON_JOB_CLOSE`）没做**：那是"连孙进程一起收"的兜底，与看门狗互补。当前靠看门狗已能保证"爹没了它自己走"，但 Tauri 被 `TerminateProcess` 时看门狗有最多 2 秒窗口期，且孙进程（worker）的回收仍依赖 sidecar 先死。灰度期继续挂着。
 13. ✅ **已修**（变异 2/2 全红）**生成成功后 `saveConfig` 抛异常会把结果翻成"生成失败"**（`useExportTask.ts:119-140` 成功分支与 catch 在同一个 try）：图已生成、记录已上报，员工看到失败必然再点一次 → 撞 409，白跑一轮 PS。
     → 「记住上次用的模板/作者」抽成 `rememberThisCombo()`，自带 try/catch，失败只 `console.warn`，**不弹 toast**（告诉员工"没记住"除了焦虑没别的用）。清空表单、提示成功、结果条滚动都在它之后，因此都不再被这一步拖累。用例 `client/src/composables/useExportTask.spec.ts`（7 条，其中 4 条专门盯"saveConfig 炸了也必须报成功"）。
 14. ✅ **已修**（变异 2/2 全红）**三个窗口各跑一遍 `startAfterReady`**（`App.vue:107-142`）→ 启动瞬间对同一批 pending 并发 flush；成功记录有唯一索引兜底（409），但 **5xx 的记录会被并发两三轮各记一次 `failures`**——`MAX_ATTEMPTS=5` 提前用完，本该还能重试的记录被提前丢进死信（真丢数据）；两个请求还会同时 `_rewrite` 同一个 json，后写的覆盖前写的。
@@ -161,7 +172,12 @@
     → 顺带把 `reporter.py` / `routes_shell.py` 里手抄两份的"空补传结果"换成 `queue.empty_result()`：字段少一个是 `undefined`，比报错难查得多。
 15. ✅ **已修**（变异 4/4 全红）**"测试连接"测的是已保存的旧地址**（`AccountTab.vue:22-39` 调 `/status`，后者用 `load_config()` 的磁盘值），toast 却打印表单里的新地址 → 改了地址提示"连接成功"，保存后连不上。
     → 新增 `client/sidecar/conn_test.py` + `POST /config/test`：**用表单里此刻填的地址与 Key** 真发请求。两步探针——先 `/health` 判地址，再打一个需要鉴权的接口判 Key（只看 `/health` 的话，Key 是上一任的也照样 200）。结论分四档 `invalid` / `unreachable` / `key_bad` / `server_error`，前端如实转述；任何异常都不许抛出（按钮不能永远停在"测试中…"）。用例 `tests/test_conn_test.py`（12 条）+ `vue-tsc` 通过。
-16. **PS 无硬超时看门狗**：`executor.py:116-125` 进程活着就一直返回 running，`heartbeat_stale` 只用来显示；`close_document` 失败被 `logger.debug` 吞掉并置 None（`ps_service.py:96-104`）→ PS 里文档越叠越多，最终"暂存盘不足"。
+16. ✅ **已修**（变异 8/8 全红 + Rust 3/3 全红）**PS 无硬超时看门狗**：`executor.py:116-125` 进程活着就一直返回 running，`heartbeat_stale` 只用来显示；`close_document` 失败被 `logger.debug` 吞掉并置 None（`ps_service.py:96-104`）→ PS 里文档越叠越多，最终"暂存盘不足"。
+    → **硬超时 300 秒**（拆到 `sidecar/timeout.py`，`executor.py` 又从 300 行门禁边上退回来）：`status()` 轮询路径和后台 reaper（`_sweep_once`）用**同一个判据**——只写在一处，两处各写一份早晚有一处先漂。判据**只看总耗时、不看心跳**：worker 卡在 COM 里时 pywin32 会释放 GIL，心跳照常每 2 秒跳，看起来一切正常。
+    → 中止顺序是**先写终态再 kill**（和 `cancel()` 同一套理由）：反过来的话，被杀的 worker 有可能先把"进程没了但终态没写"写进磁盘，于是被判成 `uncertain`——员工看到"结果未知"，其实是我们自己掐的。
+    → 终态 `success=false` 且 `state="timeout"`；结算层（`settler.py`）把它映射成 `uncertain: true, timeout: true` 上报，**不生成 failed 记录**——图有可能已经导出来了，只是卡在收尾，报失败既让员工白重做一张，也污染失败率。前端 `ExportFail` 加 `timeout?: boolean`，与 `uncertain` 同类处理。
+    → **关文档失败不再不可见**：`close_document` 返回原因串（`""` 表示成功），runner 把它挂到本次结果的 `warnings` 上——"它不影响这张图，但请手动关掉 PS 里那个模板，否则文档会越叠越多"。`disconnect()` 里的同类吞掉也一并改成 warning。
+    → 用例 `tests/test_executor.py`（+6：判据纯函数/终态绝不报成功/轮询路径中止/**没人轮询时 reaper 也会中止**/新任务不被误杀/worker 盯的是 sidecar 的 pid）+ `tests/test_run_export.py`（+3）+ `tests/test_settler.py`（timeout 参数化）+ `tests/test_ps_service.py`（2 条改写）。
 17. ✅ **已修**（变异 5/5 全红）**队列补传时图没了仍建"无图记录"**（`api_client.py:61-75` 只在 `exists()` 时才带 files），UI 还显示"已同步"；`queue` 只存路径字符串不复制文件 → 员工整理过输出目录就永久丢图。
     → 新增 `image_buffer.py`：入队时把成品图**复制**进 `%APPDATA%\psluyong-lite\pending_images\{item_id}.jpg`（与队列 json 同名，保住对应关系），补传优先用副本；复制失败（磁盘满/杀软锁文件）只记日志、记录照常入队并退回用原路径。缓冲和原目录**都**找不到时**不提交**、整条转死信（图跟着进 `dead/`，人工点「重试死信」时连图一起搬回缓冲），界面显示"死信 N 条"。副本有保留期：成功落地/业务拒绝时立刻删，超过 7 天且队列与死信里都没有对应 json 的孤儿按天清掉。首次上报那条路（`reporter` 直调 `api_client`）保留"无图也发"（失败记录本来就没图），但补了一条 warning 日志。
     → `api_client` 的 `exists()` 顺手改成 `is_file()`：目录也能通过 `exists()`，`open()` 会抛。
@@ -250,9 +266,9 @@
 
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
-| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（803 全绿，前端 56 例 + vue-tsc 通过） | 每条 P0 有回归用例且做过变异验证 |
+| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（845 全绿，前端 56 例 + vue-tsc 通过，Rust 13 例） | 每条 P0 有回归用例且做过变异验证 |
 | **第 2 周** | 打第一版带版本号的安装包；3 人灰度（含 1 台老机器/1 个非 RGB 模板） | 灰度 5 个工作日：0 丢图、0 无记录、日报每日到达 |
-| **第 3 周** | P1 服务端 1/2/3 + 客户端 9/10/11/13/14/15/17 + 18 的 open-folder ✅ 已完成；员工手册、诊断包、预检脚本 ✅ 已完成（2026-10-24 第二、三、四批） | 灰度反馈清零 |
+| **第 3 周** | P1 服务端 1/2/3 ✅；客户端 9/10/11/12/13/14/15/16/17 ✅；18 的 open-folder ✅；员工手册、诊断包、预检脚本 ✅（2026-10-24 第二~五批） | 灰度反馈清零 |
 | **第 4 周** | 全量分发（签名安装包 + 自动更新通道）；上线监控与备份演练 | 上线检查清单（DEPLOY 第四节）全打勾 + 演练记录归档 |
 
 **不建议**跳过灰度直接全量：P0-5 与 P0-6 的表现都是"客户端看着正常、数据没了"，全量后才发现就要挨台排查。

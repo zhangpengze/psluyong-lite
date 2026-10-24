@@ -70,6 +70,11 @@ export interface ExportFail {
   cancelled?: boolean
   /** PS 崩溃导致结果未知，需要人去输出目录确认 */
   uncertain?: boolean
+  /**
+   * 跑太久被 sidecar 强制中止（PS 卡在对话框/大模板上，或前端已经关掉没人看着）。
+   * 和 uncertain 同一类"结果未知"：图可能已经导出来了，必须去输出目录看一眼。
+   */
+  timeout?: boolean
 }
 
 export type ExportResult = ExportOk | ExportFail

@@ -284,17 +284,25 @@ def test_close_document_closes_with_no_save_and_clears():
     svc, _ = new_service()
     doc = FakeDoc()
     svc._current_document = doc
-    svc.close_document(save_changes=False)
+    reason = svc.close_document(save_changes=False)
     assert doc.close_modes == [2], "默认必须用不保存方式关闭（2 = psDoNotSaveChanges）"
     assert svc._current_document is None
+    assert reason == "", "关掉了就没什么要报告的"
 
 
 def test_close_document_swallows_close_error():
-    svc, fake = new_service()
-    svc._current_document = object()
-    fake.close_error = RuntimeError("COM 已崩")
-    svc.close_document()  # 不允许抛出，清理链路必须安全
-    assert svc._current_document is None
+    """不抛异常（清理链路必须安全），但必须**说出来** —— 返回值交给 runner 挂警告
+
+    旧版只 logger.debug("（可忽略）")：文档留在 PS 里，一次一张，攒到十几张之后
+    员工看到的是"暂存盘不足"，一个跟他做的事毫无关系的报错。
+    """
+    svc, _fake = new_service()
+    svc._current_document = object()  # 没有 Close()，等价于 COM 已经不可用
+
+    reason = svc.close_document()
+
+    assert "关闭 Photoshop 文档失败" in reason, "失败原因必须带出来，否则上层只能瞎猜"
+    assert svc._current_document is None, "引用照旧清空：留着会拿失效的 COM 对象再去关一次"
 
 
 def test_close_document_without_doc_is_noop():

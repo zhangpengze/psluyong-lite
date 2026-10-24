@@ -54,6 +54,9 @@ class FakePSService:
         self.exported: tuple | None = None
         self.closed_with: list[bool] = []
         self.last_replacement_warnings: list[str] = []
+        # 关文档失败时返回的原因（空串 = 关掉了）。PS 卡在对话框上时会抛，
+        # 文档就留在 PS 里，一次一张，攒够了就是"暂存盘不足"
+        self.close_error = ""
 
     def is_connected(self) -> bool:
         self.calls.append(("is_connected",))
@@ -91,9 +94,10 @@ class FakePSService:
         self._write_image(Path(output_path))
         return (True, "")
 
-    def close_document(self, save_changes: bool = False) -> None:
+    def close_document(self, save_changes: bool = False) -> str:
         self.calls.append(("close_document", save_changes))
         self.closed_with.append(save_changes)
+        return self.close_error
 
     # ---- 造图（模拟 PS 的真实产出）----
     def _write_image(self, path: Path) -> None:
@@ -561,3 +565,40 @@ def test_run_export_sweeps_stale_temp_files(tmp_path, monkeypatch):
 
     assert not stale.exists(), "两小时前的临时文件该清掉"
     assert keep.exists(), "员工自己的文件一律不许动"
+
+
+# ---------- 关文档失败必须说出来 ----------
+# 旧行为：ps_service.close_document 里 `except: logger.debug("（可忽略）")` + 置空引用。
+# 一点都不可忽略——PS 卡在对话框时 Close() 会抛，文档就留在 PS 里，一次一张；
+# 攒到十几张之后员工看到的是"暂存盘不足"，跟生成毫无关系的报错，日志里只有一行 debug。
+
+
+def test_close_failure_is_attached_to_a_successful_result(tmp_path, monkeypatch):
+    """图生成成功了也要提这一句：员工不会知道 PS 里还开着一个模板"""
+    svc = _install(monkeypatch, FakePSService())
+    svc.close_error = "关闭 Photoshop 文档失败：COM 调用被拒绝"
+
+    result = run_export(_req(tmp_path))
+
+    assert result.success is True, "关不掉文档不影响这张图"
+    assert any("关闭 Photoshop 文档失败" in w for w in result.warnings)
+    assert any("暂存盘不足" in w for w in result.warnings), "要说明后果，否则没人会去关"
+
+
+def test_close_failure_is_attached_to_a_failed_result(tmp_path, monkeypatch):
+    svc = _install(monkeypatch, FakePSService(export_ok=False))
+    svc.close_error = "关闭 Photoshop 文档失败：COM 调用被拒绝"
+
+    result = run_export(_req(tmp_path))
+
+    assert result.success is False
+    assert any("关闭 Photoshop 文档失败" in w for w in result.warnings)
+
+
+def test_no_warning_when_document_closed_cleanly(tmp_path, monkeypatch):
+    """正常关掉了就别吓人：多一条无意义的警告等于教员工忽略警告"""
+    _install(monkeypatch, FakePSService())
+
+    result = run_export(_req(tmp_path))
+
+    assert result.warnings == []

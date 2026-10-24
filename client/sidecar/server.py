@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -26,7 +27,7 @@ if str(_REPO_ROOT) not in sys.path:
 from flask import Flask  # noqa: E402
 
 from . import __version__  # noqa: E402,F401  重新导出：测试与外部读 sidecar_server.__version__
-from . import settler  # noqa: E402
+from . import parent_watch, settler  # noqa: E402
 from .api_client import ApiClient  # noqa: E402
 from .config import ClientConfig, ensure_dirs  # noqa: E402
 from .executor import Executor  # noqa: E402
@@ -79,6 +80,47 @@ def _attach_file_logger(filename: str) -> None:
     attach_file_logger(filename)
 
 
+def probe_port(port: int) -> str:
+    """端口能不能用。空串 = 能用，否则是给人看的原因。
+
+    **不能只靠 app.run 抛异常**：Windows 上 werkzeug 会开 SO_REUSEADDR，端口被
+    占时 bind 有可能照样成功，于是两个 sidecar 同时"活着"，请求落到谁手里看运气
+    —— 比直接失败更难查。所以自己先裸 bind 一次（不带 SO_REUSEADDR），拿不到就
+    说明这个端口上已经有人在应答。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError as e:
+            return f"端口 {port} 已被占用（{e}）——很可能是上一次的 sidecar 还活着，或别的程序占了它"
+    return ""
+
+
+def serve(app: Flask, port: int) -> None:
+    """绑定端口开始服务。**端口被占必须留下痕迹。**
+
+    打包后 sidecar 的 stdout/stderr 都是 `Stdio::null()`（员工不该看到黑框），
+    所以绑不上时的异常栈只会进黑洞：新 sidecar 悄无声息地死了，前端连上的其实
+    是上一次那个僵尸（busy 永远 true、配置是旧的），日志里一个字都没有。
+    """
+    problem = probe_port(port)
+    if problem:
+        logger.error("sidecar 启动失败：%s", problem)
+        logger.error(
+            "处理办法：任务管理器里结束多余的 python/psluyong-sidecar 再启动；"
+            "临时换端口可以设 SIDECAR_PORT"
+        )
+        raise SystemExit(1)
+
+    try:
+        # 只绑回环：局域网内其他机器不应能调用本机 PS
+        app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
+    except OSError as e:
+        # 探针到 app.run 之间被抢走（TOCTOU）：同样要留下痕迹
+        logger.error("sidecar 启动失败：端口 %s 绑不上（%s）", port, e)
+        raise SystemExit(1) from e
+
+
 def main() -> None:
     # PyInstaller 打包后 worker 由同一个 exe 以 --run-worker 方式拉起
     if "--run-worker" in sys.argv:
@@ -96,10 +138,12 @@ def main() -> None:
     # 之后每 15 秒兜底扫一遍（两条路都走同一个幂等函数）。
     if settler.start_settler(_client):
         logger.info("任务结算已启动：启动对账 + 每 %.0fs 兜底", settler.SETTLE_INTERVAL_S)
-    logger.info("sidecar 启动 http://127.0.0.1:%s", port)
-
-    # 只绑回环：局域网内其他机器不应能调用本机 PS
-    app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
+    # 父进程（Tauri）没了就跟着退：否则本进程会继续占着 8765 变成僵尸，
+    # 下次启动的 sidecar 绑不上端口、静默死在 DEVNULL，前端连到的是上一轮的我们
+    if parent_watch.start() is not None:
+        logger.info("父进程看门狗已启动（pid=%s）", parent_watch.pid_from_env())
+    logger.info("sidecar 启动 http://127.0.0.1:%s pid=%s", port, os.getpid())
+    serve(app, port)
 
 
 if __name__ == "__main__":

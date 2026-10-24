@@ -163,7 +163,19 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 
 ## 部署
 
-见 [docs/DEPLOY.md](docs/DEPLOY.md)：NAS Docker 部署、客户端打包、QQ 机器人配置。
+见 [docs/DEPLOY.md](docs/DEPLOY.md)：NAS Docker 部署、客户端打包、QQ 机器人配置、
+回滚（镜像 git-sha tag / 数据库恢复彩排）、两份 Dockerfile 与 compose 的配置差异对照。
+
+NAS 部署包用 `scripts/package_nas.py` 打：
+
+```bash
+python scripts/package_nas.py              # 含本机 .env 的安装包
+python scripts/package_nas.py --no-env     # 出厂包：不含密钥，目标机现填
+python scripts/package_nas.py --no-data    # 空库部署
+python scripts/package_nas.py --help       # 全部选项
+```
+
+**注意：默认打的 zip 含本机 `.env`（SECRET_KEY / API_KEY / ADMIN_PASSWORD 等密钥），属敏感件**——只在受控内网流转、勿外发、勿传网盘。发给其它机器/同事用 `--no-env` 出厂包（包内改为 `.env.example`，目标机 `cp .env.example .env` 后自建密钥）。
 
 ## 已知限制
 

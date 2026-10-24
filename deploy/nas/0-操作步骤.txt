@@ -7,10 +7,22 @@ psluyong-lite → 绿联 DH4300 Plus（ARM64）部署
 Dockerfile            构建镜像用（第一行是 FROM python:3.11-slim）
 docker-compose.yml    编排（第一行是 services:）
 .env                  全部配置已填好（隐藏文件，需要开"显示隐藏文件"才看得见）
+                      ※ 出厂包（--no-env 打的包）里没有 .env，包内是 .env.example，
+                        按第一节 0 建 .env 后再往下走
 .dockerignore         让 data/ 不进构建上下文
 requirements.txt      Python 依赖
 server/  bot/  core/  源码（共 41 个文件）
 data/                 现有数据：app.db + 190 张成品图 + 日报
+
+0. 出厂包先建 .env（只有 --no-env 的包需要）
+------------------------------------------------
+cp .env.example .env    （文件管理里复制并重命名即可，注意别存成 .env.txt）
+必填三项：SECRET_KEY / API_KEY / ADMIN_PASSWORD
+    python -c "import secrets;print(secrets.token_urlsafe(48))"   # 生成 SECRET_KEY
+    python -c "import secrets;print(secrets.token_urlsafe(32))"   # 生成 API_KEY
+要接日报推送再填：NAPCAT_TOKEN / REPORT_GROUP_ID
+不建 .env 就启动会报「env file .env not found」或「环境变量 SECRET_KEY 未设置」——
+这是预期行为，先把 .env 建好。
 
 一、上传解压
 ------------
@@ -21,7 +33,8 @@ data/                 现有数据：app.db + 190 张成品图 + 日报
    - docker/psluyong-lite/ 第一层直接看到 docker-compose.yml、Dockerfile
    - 第一层有 server/ bot/ core/ data/ 四个文件夹
    - 没有 psluyong-lite/psluyong-lite-nas/... 这种多套一层
-5. 文件管理右上角勾选「显示隐藏文件」，确认 .env 和 .dockerignore 在
+5. 文件管理右上角勾选「显示隐藏文件」，确认 .env（出厂包为 .env.example）
+   和 .dockerignore 在
 
 二、建项目
 ----------
@@ -87,3 +100,15 @@ env file .env not found / SECRET_KEY 未设置
 --------------
 备份只需备份 data/ 目录。
 8080 是管理后台，不要直接暴露公网，只在内网用或前面挂 HTTPS 反代。
+数据回滚：docker exec <容器名> python -m server.backup --list 找备份，
+--restore <文件> --rehearse 先彩排，通过后 --restore <文件> 真恢复，
+然后重启项目。完整步骤见 docs/DEPLOY.md 第五节「回滚」。
+
+九、给开发者（这个 zip 是怎么来的）
+----------------------------------
+deploy/nas/ 目录本身没有 Dockerfile 和源码，在那里直接 docker compose up --build
+会失败——必须在仓库根先打包，zip 解压后才是完整构建上下文：
+    python scripts/package_nas.py              # 含 .env 的安装包（带密钥，敏感件，勿外发）
+    python scripts/package_nas.py --no-env     # 出厂包，不含任何密钥
+    python scripts/package_nas.py --no-data    # 空库部署
+打 tag / 回滚见 docs/DEPLOY.md 第五节，配置差异对照见第六节。

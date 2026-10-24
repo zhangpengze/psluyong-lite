@@ -8,7 +8,10 @@
 services:
   server:
     build: .
-    image: psluyong-lite:latest
+    # 版本化 tag：构建时带 PSLUYONG_IMAGE_TAG=$(git rev-parse --short HEAD) 即按
+    # 提交号落 tag，回滚时指定旧 tag 重启即可；不设则退化为 latest（兼容旧部署）。
+    # 打 tag 规范与回退命令见 docs/DEPLOY.md 第五节「回滚」。
+    image: psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}
     container_name: psluyong-lite
     restart: unless-stopped
     ports:

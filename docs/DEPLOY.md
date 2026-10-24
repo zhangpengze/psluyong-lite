@@ -406,3 +406,113 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 - [ ] 后台点「重推此日报」，QQ 群收到且徽标变「已推送」
 - [ ] 配了群内指令：NapCat 上报地址指向 `/api/v1/bot/onebot`，群里发「汇总」私聊能收到
 - [ ] 检查 `/health/ready` 返回 200
+- [ ] 上线前已记录本次镜像 tag：`docker images psluyong-lite`（回滚要用，见第五节）
+- [ ] **每月一次恢复演练**：`docker exec psluyong-lite python -m server.backup --restore <最近一份备份文件> --rehearse` 输出「彩排通过」且打印各表行数——只校验不落盘，练的是"备份真的能恢复"（步骤见第五节 5.3）
+
+---
+
+## 五、回滚
+
+> 前提：镜像按 git 短 SHA 打了 tag（见 5.1）。回滚分两条链路：**应用**回退镜像 tag，
+> **数据**回退备份文件，两条互不绑定——镜像回退不动数据，数据回退不动镜像。
+
+### 5.1 镜像版本化（打 tag 规范）
+
+两份 compose（根 `docker-compose.yml`、`deploy/nas/docker-compose.yml`）的镜像名统一为参数化写法：
+
+```yaml
+image: psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}
+```
+
+- **构建时**用 git 短 SHA 作 tag（一个 tag 对应一个可复现的提交）：
+
+```bash
+PSLUYONG_IMAGE_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
+```
+
+- UGOS 图形界面传不了命令行变量时，在项目目录的 `.env` 里加一行即可——compose
+  自动读同目录 `.env` 做变量替换，界面部署同样生效：
+
+```bash
+# .env
+PSLUYONG_IMAGE_TAG=a1b2c3d
+```
+
+- 不设 `PSLUYONG_IMAGE_TAG` 时退化为 `latest`，与旧部署完全兼容（不改 `.env` 也不会挂）。
+- 构建后确认 tag：`docker images psluyong-lite`。**每次上线前记下当前可用 tag**，
+  正常状态下应能看到新旧 tag 并存（回滚就是靠旧 tag）。
+
+### 5.2 应用回滚（回退镜像）
+
+1. 先定目标 tag：`docker images psluyong-lite --format '{{.Tag}}'`（取上一个可用的短 SHA）。
+2. 本地还留着旧镜像时，**直接指定旧 tag 重新起容器**（不重新构建，秒级回退）：
+
+```bash
+PSLUYONG_IMAGE_TAG=<旧短SHA> docker compose up -d
+```
+
+UGOS 图形界面：把 `.env` 里的 `PSLUYONG_IMAGE_TAG` 改成旧短 SHA → 项目 → 重启。
+
+3. 旧镜像已被清理时，检出旧提交重新构建：
+
+```bash
+git checkout <上一个可用提交>          # 或 git revert <坏提交>
+PSLUYONG_IMAGE_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
+git checkout main                      # 回到原分支
+```
+
+4. 验证：`/health/ready` 返回 200、管理员能登录、「每日日报」页正常。
+   仍不对就再往前退一个 tag——**不要在现场改代码**。
+
+> 镜像回滚只换代码不换数据：`server/data`（NAS 包为 `data/`）是独立数据卷，
+> 换 tag 不影响库和图片。若坏版本已经写坏了数据，走 5.3。
+
+### 5.3 数据库回滚（恢复备份）
+
+能力都在 `python -m server.backup`（参数以 `python -m server.backup --help` 为准：
+`--list` / `--restore FILE` / `--rehearse` / `--keep N` / `--mirror-images`）：
+
+```bash
+# 1. 看有哪些备份（文件在 /app/data/backups/，每天 03:30 自动一份）
+docker exec psluyong-lite python -m server.backup --list
+
+# 2. 彩排：解压 + PRAGMA integrity_check + 核心表校验 + 打印各表行数，
+#    全过才打印「彩排通过」——不写任何文件，随时可跑
+docker exec psluyong-lite python -m server.backup \
+    --restore /app/data/backups/<文件名>.db.gz --rehearse
+
+# 3. 上一步通过后才做真实恢复
+docker exec psluyong-lite python -m server.backup \
+    --restore /app/data/backups/<文件名>.db.gz
+
+# 4. 重启容器让服务重新打开库（恢复执行时旧进程仍握着旧库的文件句柄）
+docker compose restart server
+# UGOS 图形界面：Docker → 项目 → psluyong-lite → 重启
+```
+
+- 恢复前会自动把当前库留档为 `app.db.pre-restore-<8位>`；恢复出错就停容器、
+  把留档文件改回 `app.db`，即回到恢复前状态。
+- 彩排（`--rehearse`）与真实恢复用同一条命令，只差最后一个参数——每月演练
+  （上线检查清单最后一项）跑的就是它。
+- **兜底**：整库恢复不了时，停容器后直接还原 `server/data`（NAS 包为 `data/`）
+  整个目录，`app.db-wal` / `app.db-shm` 一并删掉，再起容器。
+
+---
+
+## 六、两份 Dockerfile / 两份 compose 配置差异对照（漂移收敛记录）
+
+四份部署配置 = 根 `Dockerfile` + `deploy/nas/Dockerfile.lean` + 根 `docker-compose.yml` +
+`deploy/nas/docker-compose.yml`。**改任何一份之前先查本表**，防止只改一半又造新漂移。
+
+| 维度 | 根（仓库直部） | deploy/nas（package_nas 打包） | 处置 |
+|---|---|---|---|
+| 构建上下文 | 仓库根，`build: .`，Dockerfile/源码齐全 | **本目录无 Dockerfile 与源码，直接 `up --build` 必失败**；须在仓库根 `python scripts/package_nas.py` 打包，zip 根目录才是完整上下文 | 保留差异 + 两边都写明（compose 头注释、包内 `0-操作步骤.txt` 第九节） |
+| pip 源 | 官方 pypi.org | 仅清华源（国内实测 pypi 仅 13.8 kB/s，SQLAlchemy 直接超时） | 功能性差异，保留 |
+| apt 依赖 | 装 `curl` + libjpeg/zlib/tzdata | 不跑 apt（Pillow manylinux wheel 自带 libjpeg/zlib，tzdata 由 pip 包提供） | 功能性差异，保留 |
+| healthcheck 探针 | `curl -fsS /health/ready` | `python -c urllib`（精简镜像里没有 curl） | 功能性差异，与上一行绑定，保留 |
+| 运行身份 | `USER appuser`（1000），最小权限 | `user: "0:0"` + 启动时 `chmod -R 777 /app/data` | **功能性差异保留**——NAS 挂载目录属主不一定是 1000，root+777 是挂载属主权宜。**风险**：容器内任何进程可改写全部数据，文件权限形同虚设。**改进路径**：NAS 文件管理把 `data` 目录属主改为 1000:1000 后，删掉 NAS compose 的 `user:` 与 `command:` 两行即回到最小权限 |
+| 数据卷 | `./server/data:/app/data` | `./data:/app/data` | 功能性差异保留（zip 根目录即项目目录，目录结构不同） |
+| ENABLE_SCHEDULER | `${ENABLE_SCHEDULER:-1}`（environment 显式声明） | 原先缺失 → **已补齐同款一行** | **真漂移已修复**。核实结论：`Config.ENABLE_SCHEDULER` 缺省为 1、打包出的 `.env` 也带 `ENABLE_SCHEDULER=1`，所以此前 NAS 日报并不会不跑——但缺键只是巧合兜底，两份 compose 必须同款显式声明，改默认值时才不会只影响一边 |
+| extra_hosts | 无 | `host.docker.internal:host-gateway`（容器内访问宿主机 13000 的 NapCat） | 功能性差异保留；根 compose 的 NapCat 走局域网 IP（见第三节 3） |
+| 镜像 tag | `psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}` | 同左 | **已收敛为同款**（原两处写死 `latest`，即 B7） |
+| 日志限流 / 资源限制 | json-file 10m×3 / 2 核 1G | 同左 | 一致，无漂移 |

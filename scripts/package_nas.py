@@ -6,12 +6,18 @@
     server/ bot/ core/    源码
     docker-compose.yml    NAS 专用编排（extra_hosts 指向宿主机）
     .env                  沿用本机密钥 + 已配好的 NapCat 设置
+                          （--no-env 出厂包不含 .env，改放 .env.example）
     data/                 运行时数据（可用 --no-data 排除）
-    部署说明.md
+    0-操作步骤.txt        包内操作说明
 
 用法：
     .venv\\Scripts\\python.exe scripts\\package_nas.py            # 含现有数据
     .venv\\Scripts\\python.exe scripts\\package_nas.py --no-data  # 空库部署
+    .venv\\Scripts\\python.exe scripts\\package_nas.py --no-env   # 出厂包：不含 .env 密钥
+
+默认把本机 `.env`（SECRET_KEY / API_KEY / ADMIN_PASSWORD 等）打进 zip——**属敏感件，
+只在受控内网流转**。发给其它机器/同事用 `--no-env` 出厂包：zip 里改为放
+`.env.example`，目标机上自建 `.env`。
 """
 
 from __future__ import annotations
@@ -177,6 +183,8 @@ def _copy_data(staging: Path) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-data", action="store_true", help="不打包 data/，部署空库")
+    ap.add_argument("--no-env", action="store_true",
+                    help="不把 .env 打进 zip（出厂包：包内放 .env.example，密钥在目标机现填）")
     ap.add_argument("--code-only", action="store_true",
                     help="只打包代码与构建文件（不含 .env / data），用于更新已有部署")
     ap.add_argument("--out", type=Path, help="输出 zip 路径（默认桌面）")
@@ -212,8 +220,16 @@ def main() -> int:
                 total += _copy_tree(src, staging / name)
 
         shutil.copy2(ROOT / "deploy" / "nas" / "docker-compose.yml", staging / "docker-compose.yml")
-        if not args.code_only:
+        if args.no_env:
+            # 出厂包：不把本机密钥打进 zip，改放模板，目标机上 cp .env.example .env 现填
+            shutil.copy2(ROOT / ".env.example", staging / ".env.example")
+            total += 1
+            env_note = "已排除（--no-env 出厂包，包内为 .env.example）"
+        elif not args.code_only:
             (staging / ".env").write_text(_render_env(local_env), encoding="utf-8")
+            env_note = "已包含 .env（含密钥，敏感件，勿外发）"
+        else:
+            env_note = "已排除（--code-only）"
 
         data_note = "已排除（空库部署）"
         if not args.no_data and not args.code_only:
@@ -242,6 +258,7 @@ def main() -> int:
     print("已生成:", out)
     print(f"  体积      : {size_mb:.1f}MB")
     print(f"  源码文件  : {total} 个")
+    print(f"  密钥      : {env_note}")
     print(f"  数据      : {data_note}")
     print()
     print("下一步：UGOS 文件管理 → 上传这个 zip → 解压到 docker/psluyong-lite/")

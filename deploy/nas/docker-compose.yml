@@ -5,11 +5,18 @@
 # 本服务通过 host.docker.internal:13000 访问它（extra_hosts 负责把域名指向宿主机）。
 #
 # 数据全部在 ./data（数据库 / 成品图 / 日报 / 备份），备份这个目录即可。
+#
+# ⚠ 本目录是「打包源」，不是可直接部署的目录：deploy/nas/ 下没有 Dockerfile 和
+#   源码，在这里直接 `docker compose up --build` 会失败。正确路径是在仓库根执行
+#   `python scripts/package_nas.py` 打包，zip 解压后的目录才具备完整构建上下文
+#   （Dockerfile / requirements.txt / server/ bot/ core/ 都在 zip 根目录）。
 
 services:
   server:
     build: .
-    image: psluyong-lite:latest
+    # 版本化 tag：与根 compose 同款，构建时 PSLUYONG_IMAGE_TAG=$(git rev-parse
+    # --short HEAD)，回滚指定旧 tag；不设则 latest。见 docs/DEPLOY.md 第五节。
+    image: psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}
     container_name: psluyong-lite
     # NAS 上挂载目录的属主通常不是 1000，容器内 appuser 会写不进去
     # （报 PermissionError: /app/data/images）。用 root 运行避开这个问题。
@@ -24,6 +31,10 @@ services:
     environment:
       DATA_DIR: /app/data
       TZ: ${TZ:-Asia/Shanghai}
+      # 定时日报/备份调度开关，与根 compose 同款显式声明。Config 里缺省也是 1
+      # （缺键不会让日报不跑），写出来是为两份 compose 一致——将来改默认值
+      # 不会只影响一边。真漂移修复，勿删。
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-1}
       # 成品图镜像目录（容器内路径）。把 NAS 第二块盘/另一台共享目录挂到
       # /app/mirror，这里就填 /app/mirror；留空 = 不镜像（盘坏即丢图）。
       IMAGES_MIRROR_DIR: ${IMAGES_MIRROR_DIR:-}

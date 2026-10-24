@@ -16,13 +16,30 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # 行数门禁：源文件 >300 行即失败。口径 = server/core/bot/client 的
+      # py/vue/ts/js（不含 css/tests/scripts，与项目裁决一致）。
+      # 只在 Linux 跑一次（矩阵里跑两遍没意义；Windows 侧 find/awk 语义不同）。
+      - name: Line count guard (<=300)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          out=$(find server core bot client/sidecar client/src -name '*.py' -o -name '*.vue' -o -name '*.ts' -o -name '*.js' | grep -v node_modules | xargs wc -l | awk '$1>300 && $2!="total"' || true)
+          if [ -n "$out" ]; then
+            echo "以下文件超过 300 行（口径：server/core/bot/client，不含 css/tests/scripts）："
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          echo "行数门禁通过：无超过 300 行的源文件"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run tests
         run: python -m pytest tests -q
+        # 无超时保护时一次挂死的测试会占满 6 小时 runner 配额
+        timeout-minutes: 15
 
   client:
     # 前端以前完全不在流水线里：vue-tsc / vitest / build 全绿才说明客户端能装出来，

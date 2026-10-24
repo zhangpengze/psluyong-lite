@@ -1,12 +1,9 @@
-"""
-Photoshop 自动化服务
+"""Photoshop 自动化服务
 
 封装 COM 操作：连接、打开 PSD、文本替换、导生成片。
-逻辑移植自 psluyong，去掉 UI 接口依赖，保留全部加固点：
-  - COM 错误 → 人话翻译（HRESULT 表 + 关键字规则）
-  - 零匹配治理：没有任何图层被替换时不返回假成功
-  - 导出后校验文件真实落盘
-  - 字体可用性 / 文本超出画布告警
+逻辑移植自 psluyong，去掉 UI 接口依赖，保留全部加固点：COM 错误 → 人话翻译
+（HRESULT 表 + 关键字规则）、零匹配治理（没有图层被替换时不返回假成功）、
+导出后校验文件真实落盘、字体可用性 / 文本超出画布告警。
 """
 
 from __future__ import annotations
@@ -18,6 +15,7 @@ from typing import Any, Dict, List, Tuple
 
 from .ps_com_errors import format_com_error
 from .ps_connector import COM_AVAILABLE, PSConnector
+from .ps_preflight import document_info, prepare_for_export
 from .ps_text import check_text_overflow, match_text, replace_text, safe_layer_name
 
 logger = logging.getLogger(__name__)
@@ -26,6 +24,9 @@ if COM_AVAILABLE:  # pragma: no branch
     import pywintypes
 else:  # pragma: no cover - 非 Windows
     pywintypes = None  # type: ignore[assignment]
+
+# psConstants.psRGB。模板是 CMYK 时导出 JPG 会偏色，导出前统一转过来
+PS_MODE_RGB = 3
 
 
 class PSService:
@@ -54,14 +55,14 @@ class PSService:
             return False, f"Photoshop 路径不存在: {e}"
         except Exception as e:
             if pywintypes is not None and isinstance(e, pywintypes.com_error):
-                msg = self._format_com_error(e)
+                msg = format_com_error(e)
                 logger.error("连接 Photoshop COM 错误: %s", msg)
                 return False, msg
             logger.error("连接 Photoshop 失败: %s", e)
             return False, f"无法连接到 Photoshop: {e}"
 
     def _format_com_error(self, error: Any) -> str:
-        """COM 错误 → 人话（委托 ps_com_errors，方法保留供调用方使用）"""
+        """COM 错误 → 人话（委托 ps_com_errors）"""
         return format_com_error(error)
 
     def is_connected(self) -> bool:
@@ -87,7 +88,7 @@ class PSService:
             return False, f"文档不存在: {e}"
         except Exception as e:
             if pywintypes is not None and isinstance(e, pywintypes.com_error):
-                msg = self._format_com_error(e)
+                msg = format_com_error(e)
                 logger.error("打开文档 COM 错误: %s", msg)
                 return False, f"打开文档失败: {msg}"
             logger.error("打开文档失败: %s", e)
@@ -207,7 +208,7 @@ class PSService:
             return False, None, f"文本替换失败: {e}"
         except Exception as e:  # noqa: BLE001 - 兜底翻译 COM 错误
             if pywintypes is not None and isinstance(e, pywintypes.com_error):
-                msg = self._format_com_error(e)
+                msg = format_com_error(e)
                 logger.error("文本替换 COM 错误: %s", msg)
                 return False, None, f"文本替换失败: {msg}"
             logger.error("文本替换未知错误: %s", e)
@@ -236,6 +237,13 @@ class PSService:
         return texts
 
     # ========== 导出 ==========
+    # 导出前体检的实现在 ps_preflight（只跟文档属性打交道），这里转发给 runner 用
+    def document_info(self) -> Dict[str, Any]:
+        return document_info(self._current_document)
+
+    def prepare_for_export(self) -> Tuple[bool, List[str]]:
+        return prepare_for_export(self._current_document)
+
     def export_document(
         self, output_path: Path, output_format: str = "JPG", quality: int = 12
     ) -> Tuple[bool, str]:
@@ -272,7 +280,7 @@ class PSService:
             return False, f"输出路径不存在: {e}"
         except Exception as e:  # noqa: BLE001 - 兜底翻译 COM 错误
             if pywintypes is not None and isinstance(e, pywintypes.com_error):
-                msg = self._format_com_error(e)
+                msg = format_com_error(e)
                 logger.error("导出文档 COM 错误: %s", msg)
                 # 带上目标路径：「文件不存在」这类通用翻译不说是哪个文件，
                 # 员工永远想不到是设置里的输出目录填错了

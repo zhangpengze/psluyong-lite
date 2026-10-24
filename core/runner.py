@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+from .export_check import inspect_image, sweep_stale_temps, temp_output_path
 from .ps_service import get_ps_service
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,9 @@ def run_export(req: ExportRequest) -> ExportResult:
     except OSError as e:
         return done(False, message=f"无法创建输出目录 {output_dir}: {e}")
 
+    # 上次被取消/崩溃留下的半成品（临时名）先清掉，别越积越多
+    sweep_stale_temps(output_dir)
+
     service = get_ps_service()
 
     # 已连接就不重复连——PS 冷启动要十几秒，每次重连体验会很差
@@ -143,6 +148,13 @@ def run_export(req: ExportRequest) -> ExportResult:
         return done(False, message=error)
 
     try:
+        # 导出前体检：尺寸拿来做成品比对；CMYK/16bit 会导出偏色，先转过来
+        info = service.document_info() if hasattr(service, "document_info") else {}
+        expect_size = (info["width"], info["height"]) if info.get("width") and info.get("height") else None
+        ok, prep_warnings = service.prepare_for_export() if hasattr(service, "prepare_for_export") else (True, [])
+        if not ok:
+            return done(False, message="没有打开的文档")
+
         # 真实模板（录用通知 PSD）里占位符是嵌在整段文字中的，例如：
         #   "姓名同志：您（你们）撰写的文章《草莓种植》经专家指导委员会……"
         # 必须用「包含」替换（文字替换文字）。用「精确」全等匹配永远命中不了，
@@ -156,14 +168,59 @@ def run_export(req: ExportRequest) -> ExportResult:
         warnings = list(getattr(service, "last_replacement_warnings", []) or [])
         if not ok:
             return done(False, message=error, warnings=warnings)
+        warnings = list(prep_warnings) + warnings
 
-        output_path = build_output_path(req)
-        ok, error = service.export_document(output_path, req.output_format, req.jpg_quality)
+        final_path = build_output_path(req)
+        temp_path = temp_output_path(final_path)
+        ok, error = service.export_document(temp_path, req.output_format, req.jpg_quality)
         if not ok:
+            # 导出失败时临时名也不该留着（员工看到 .psluyong-tmp 会来问）
+            _discard(temp_path)
             return done(False, message=error, warnings=warnings)
 
-        return done(True, image_path=output_path, warnings=warnings)
+        # 金标准校验：尺寸/空白/色域/半截文件。**验过了才用交付名**，
+        # 所以"目录里有个名字合规但内容是半截的图"在结构上不可能发生
+        check = inspect_image(temp_path, expect_size=expect_size)
+        if not check.ok:
+            kept = _reject(temp_path, final_path, keep=check.keep)
+            message = check.reason
+            if kept is not None:
+                message += f"。这张图已另存为「{kept.name}」，可打开核对"
+            logger.error("成品校验未通过（%s）: %s", check.detail, message)
+            return done(False, message=message, warnings=warnings)
+
+        try:
+            os.replace(temp_path, final_path)
+        except OSError as e:
+            _discard(temp_path)
+            return done(False, message=f"成品发布失败（{final_path}）: {e}", warnings=warnings)
+
+        logger.info("成品已发布 %s（%s）", final_path, check.detail)
+        return done(True, image_path=final_path, warnings=warnings)
 
     finally:
         # 无论成功失败都要关掉文档，否则下次打开会叠文档、PS 内存越用越大
         service.close_document(save_changes=False)
+
+
+def _discard(path: Path) -> None:
+    """删掉本次没用的产物（临时文件/残缺文件），删不掉也不影响返回给员工的结果"""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("清理临时文件失败 %s: %s", path, e)
+
+
+def _reject(temp_path: Path, final_path: Path, keep: bool) -> Path | None:
+    """校验未通过：成型但可疑的图改名留档（给员工看），垃圾直接删。"""
+    if not keep:
+        _discard(temp_path)
+        return None
+    try:
+        target = _unique_path(final_path.parent, f"{final_path.stem}.校验未通过", final_path.suffix.lstrip("."))
+        os.replace(temp_path, target)
+        return target
+    except OSError as e:
+        logger.warning("留档校验失败的成品时出错 %s: %s", temp_path, e)
+        _discard(temp_path)
+        return None

@@ -94,14 +94,36 @@ class FakeLayerSet:
 class FakeDoc:
     """假 PS 文档：SaveAs 行为可脚本化（写盘 / 不写 / 抛错）"""
 
-    def __init__(self, layers=(), width=800, height=600, fonts=("SourceHanSansSC-Regular",)):
+    def __init__(self, layers=(), width=800, height=600, fonts=("SourceHanSansSC-Regular",), mode=3, bits=8):
         self.Layers = list(layers)
         self.Width = width
         self.Height = height
+        # 导出前体检要读的两个属性（3 = psRGB）
+        self.Mode = mode
+        self._bits = bits
+        self.mode_changes: list[int] = []
+        self.change_mode_error: Exception | None = None
+        self.bits_error: Exception | None = None
         self.Application = SimpleNamespace(Fonts=[SimpleNamespace(PostScriptName=f) for f in fonts])
         self.save_behavior = "write"  # write / noop / empty / 或异常实例
         self.saved: list[tuple] = []
         self.close_modes: list[int] = []
+
+    def ChangeMode(self, mode: int) -> None:
+        if self.change_mode_error is not None:
+            raise self.change_mode_error
+        self.mode_changes.append(mode)
+        self.Mode = mode
+
+    @property
+    def BitsPerChannel(self):
+        return self._bits
+
+    @BitsPerChannel.setter
+    def BitsPerChannel(self, value):
+        if self.bits_error is not None:
+            raise self.bits_error
+        self._bits = value
 
     def SaveAs(self, path, options, as_copy=True):
         self.saved.append((path, options, as_copy))
@@ -774,3 +796,99 @@ def test_get_all_text_layers_without_document():
     svc, _ = new_service()
     svc._current_document = None
     assert svc.get_all_text_layers() == []
+
+
+# ========== 导出前体检：尺寸基准 + 色彩模式/位深 ==========
+
+def test_document_info_reads_size_mode_bits():
+    svc, _ = new_service()
+    svc._current_document = FakeDoc(width=1024, height=768, mode=4, bits=16)
+
+    info = svc.document_info()
+
+    assert info == {"width": 1024, "height": 768, "mode": 4, "bits": 16}
+
+
+def test_document_info_without_document_is_empty():
+    svc, _ = new_service()
+    svc._current_document = None
+
+    assert svc.document_info() == {}
+
+
+def test_document_info_survives_broken_property():
+    """某个属性读不到（老版本 PS / 被锁的文档）不能把整个体检打断"""
+
+    class BrokenDoc(FakeDoc):
+        @property
+        def Mode(self):  # noqa: N802 - 模拟 COM 属性抛错
+            raise RuntimeError("COM 抽风")
+
+        @Mode.setter
+        def Mode(self, value):  # noqa: N802
+            pass
+
+    svc, _ = new_service()
+    svc._current_document = BrokenDoc(width=640, height=480)
+
+    info = svc.document_info()
+
+    assert info["width"] == 640 and "mode" not in info
+
+
+def test_prepare_for_export_without_document_fails():
+    svc, _ = new_service()
+    svc._current_document = None
+
+    assert svc.prepare_for_export() == (False, [])
+
+
+def test_prepare_for_export_leaves_rgb8_untouched():
+    svc, _ = new_service()
+    doc = FakeDoc(mode=3, bits=8)
+    svc._current_document = doc
+
+    ok, warnings = svc.prepare_for_export()
+
+    assert (ok, warnings) == (True, [])
+    assert doc.mode_changes == [], "已是 RGB 不该动文档"
+    assert doc.BitsPerChannel == 8
+
+
+def test_prepare_for_export_converts_cmyk_to_rgb():
+    """CMYK 直接导 JPG 会偏色：转过去并明确告诉员工颜色可能有差异"""
+    svc, _ = new_service()
+    doc = FakeDoc(mode=4, bits=8)
+    svc._current_document = doc
+
+    ok, warnings = svc.prepare_for_export()
+
+    assert ok is True
+    assert doc.mode_changes == [3], "3 = psRGB"
+    assert any("RGB" in w and "差异" in w for w in warnings)
+
+
+def test_prepare_for_export_downsamples_16bit():
+    svc, _ = new_service()
+    doc = FakeDoc(mode=3, bits=16)
+    svc._current_document = doc
+
+    ok, warnings = svc.prepare_for_export()
+
+    assert ok is True
+    assert doc.BitsPerChannel == 8
+    assert any("16 bit" in w for w in warnings)
+
+
+def test_prepare_for_export_conversion_failure_warns_but_continues():
+    """转不了也不能让整单生不出来：给一张略偏色的图，好过一张都没有"""
+    svc, _ = new_service()
+    doc = FakeDoc(mode=4, bits=16)
+    doc.change_mode_error = RuntimeError("文档被锁")
+    svc._current_document = doc
+
+    ok, warnings = svc.prepare_for_export()
+
+    assert ok is True
+    assert len(warnings) == 2
+    assert any("转换失败" in w for w in warnings)

@@ -537,7 +537,36 @@ docker compose restart server
 python -c "import secrets;print(secrets.token_urlsafe(32))"
 ```
 
-### 服务端（NAS）换法
+### 一键轮换（推荐）
+
+仓库自带 `scripts/rotate_secrets.py`，本地和容器里都能跑（镜像里已通过
+`COPY scripts/rotate_secrets.py` 带上，发布 zip 也会打进 `scripts/`）。它做的事：
+备份到**仓库外** → 只改目标行 → 原子写回 `.env` → 重置数据库里管理员的密码
+（这步手工最容易漏）→ 打印新值掩码与"还要同步谁"的清单。备份目录只要指到仓库里，
+它会直接拒绝执行。
+
+```bash
+# 先看计划（不落盘，顺便校验备份目录）
+python scripts/rotate_secrets.py --dry-run
+
+# 本地轮换四项
+python scripts/rotate_secrets.py --backup-dir D:/psluyong-env-backups
+
+# NAS 上（容器内跑，然后重启让 server 进程重新读 .env）
+docker compose exec web python scripts/rotate_secrets.py --yes --backup-dir /tmp/env-backups
+docker compose up -d
+```
+
+只换其中几项、暂时不动 `API_KEY`（避免逐台跑员工机）：
+
+```bash
+python scripts/rotate_secrets.py --keys SECRET_KEY,ADMIN_PASSWORD,NAPCAT_TOKEN
+```
+
+跑完按屏幕最后那段清单去改 NapCat 与员工客户端即可。**脚本不会替你重启服务、
+也不会替你改 NapCat 和客户端的配置**——这三件仍然要人手做。
+
+### 手工换法（脚本不可用时）
 
 ```bash
 # 1. 停服 + 备份当前 .env（备份放项目目录外，别再犯误提交的错）

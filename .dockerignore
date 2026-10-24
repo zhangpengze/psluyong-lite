@@ -17,6 +17,8 @@ client/
 docs/
 tests/
 scripts/
+# 例外：运维脚本要在容器内跑（密钥轮换），单独放行这一个文件
+!scripts/rotate_secrets.py
 
 # 密钥与本地产物
 .env

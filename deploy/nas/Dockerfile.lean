@@ -30,6 +30,8 @@ RUN pip install --no-cache-dir \
 COPY server ./server
 COPY bot ./bot
 COPY core ./core
+# 只带运维脚本（密钥轮换），开发探针不进镜像
+COPY scripts/rotate_secrets.py ./scripts/rotate_secrets.py
 
 RUN useradd -m -u 1000 appuser \
     && mkdir -p /app/data \

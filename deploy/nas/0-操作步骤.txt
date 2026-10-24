@@ -104,6 +104,14 @@ env file .env not found / SECRET_KEY 未设置
 --restore <文件> --rehearse 先彩排，通过后 --restore <文件> 真恢复，
 然后重启项目。完整步骤见 docs/DEPLOY.md 第五节「回滚」。
 
+密钥泄露（截图外流 / 误提交进 git）要轮换 .env 里的值，镜像里已带轮换脚本：
+    docker compose exec web python scripts/rotate_secrets.py --dry-run    # 先看计划，不落盘
+    docker compose exec web python scripts/rotate_secrets.py --yes --backup-dir /tmp/env-backups
+    docker compose up -d                                                  # 重启，进程才会重新读 .env
+轮换后必须同步：NapCat「网络配置 → HTTP 服务端」的 Token、每台员工客户端的 API Key。
+注意：只改 .env 的 ADMIN_PASSWORD 不会改库里已有的管理员密码，脚本会顺手重置。
+完整说明见 docs/DEPLOY.md 第七节「密钥轮换」。
+
 九、给开发者（这个 zip 是怎么来的）
 ----------------------------------
 deploy/nas/ 目录本身没有 Dockerfile 和源码，在那里直接 docker compose up --build

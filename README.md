@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               483 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               494 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -110,7 +110,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（483 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（494 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -176,6 +176,17 @@ python scripts/package_nas.py --help       # 全部选项
 ```
 
 **注意：默认打的 zip 含本机 `.env`（SECRET_KEY / API_KEY / ADMIN_PASSWORD 等密钥），属敏感件**——只在受控内网流转、勿外发、勿传网盘。发给其它机器/同事用 `--no-env` 出厂包（包内改为 `.env.example`，目标机 `cp .env.example .env` 后自建密钥）。
+
+密钥一旦外流（截图、误提交进 git），必须轮换而不是只删提交——force-push 后旧提交的 blob 在
+GitHub 上仍可按 SHA 直接下载。轮换用仓库自带脚本（会顺手重置数据库里的管理员密码，且拒绝把
+备份写进仓库）：
+
+```bash
+python scripts/rotate_secrets.py --dry-run          # 先看计划
+python scripts/rotate_secrets.py --backup-dir D:/psluyong-env-backups
+```
+
+换完还要同步 NapCat 的 Token 与每台员工客户端的 API Key，见 [docs/DEPLOY.md](docs/DEPLOY.md) 第七节。
 
 ## 已知限制
 

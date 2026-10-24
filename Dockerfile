@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server
 COPY bot ./bot
 COPY core ./core
+# 只带运维脚本：密钥轮换要在容器内能跑（docker compose exec web python scripts/rotate_secrets.py）。
+# 开发探针（probe_*/shot_*/verify_*）不进镜像，.dockerignore 里整体排除了 scripts/。
+COPY scripts/rotate_secrets.py ./scripts/rotate_secrets.py
 
 # 非 root 运行
 RUN useradd -m -u 1000 appuser \

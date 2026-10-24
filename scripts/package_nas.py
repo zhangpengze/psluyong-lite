@@ -219,6 +219,14 @@ def main() -> int:
             if src.is_dir():
                 total += _copy_tree(src, staging / name)
 
+        # 运维脚本单独带：容器内要能跑密钥轮换（docker compose exec web python scripts/...）。
+        # 不整目录拷——probe_*/shot_*/verify_* 这些开发探针没有上生产的理由。
+        ops_script = ROOT / "scripts" / "rotate_secrets.py"
+        if ops_script.exists():
+            (staging / "scripts").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ops_script, staging / "scripts" / "rotate_secrets.py")
+            total += 1
+
         shutil.copy2(ROOT / "deploy" / "nas" / "docker-compose.yml", staging / "docker-compose.yml")
         if args.no_env:
             # 出厂包：不把本机密钥打进 zip，改放模板，目标机上 cp .env.example .env 现填

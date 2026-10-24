@@ -16,8 +16,14 @@ import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
-import pywintypes
 import pytest
+
+# pywin32 由 requirements 用 sys_platform 标记只在 Windows 安装；本文件的用例全部
+# 围绕 com_error 对象构造与 COM 替身注入，非 Windows 平台整体跳过——否则 Linux CI
+# 会在收集期 ImportError（pytest 退出码 2，整个 job 直接红）。
+pywintypes = pytest.importorskip(
+    "pywintypes", reason="pywin32 仅 Windows 可用：COM 相关用例在非 Windows 平台跳过"
+)
 
 import core.ps_connector as m
 from core.ps_connector import PSConnector, ensure_com_available

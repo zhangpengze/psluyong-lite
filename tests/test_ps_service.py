@@ -13,8 +13,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pywintypes
 import pytest
+
+# pywin32 只在 Windows 可用（requirements 用 sys_platform 标记安装）；本文件全部用例
+# 依赖 com_error 结构与 COM 语义，非 Windows 平台整体跳过，避免 Linux CI 收集期
+# ImportError（pytest 退出码 2）。
+pywintypes = pytest.importorskip(
+    "pywintypes", reason="pywin32 仅 Windows 可用：COM 相关用例在非 Windows 平台跳过"
+)
 
 import core.ps_service as ps_service_mod
 from core.ps_service import PSService, get_ps_service

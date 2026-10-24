@@ -37,9 +37,28 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run tests
-        run: python -m pytest tests -q
         # 无超时保护时一次挂死的测试会占满 6 小时 runner 配额
         timeout-minutes: 15
+        id: pytest
+        continue-on-error: true
+        shell: bash
+        run: |
+          # tee 留一份日志：job 日志需登录才能看，失败时下一步把
+          # FAILED/ERROR 行打成注解，外部排障也能拿到失败名单。
+          set -o pipefail
+          python -m pytest tests -q --tb=short 2>&1 | tee pytest-out.log
+
+      - name: Surface failing tests
+        if: steps.pytest.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "pytest 退出码非 0；失败清单（最多 15 条，已打成注解）"
+          grep -E "^(FAILED|ERROR) " pytest-out.log | head -15 | while IFS= read -r line; do
+            echo "::error title=pytest failure::$line"
+          done
+          # 收集期错误（exit 2）未必有 FAILED 行，兜底打印尾部摘要
+          tail -30 pytest-out.log
+          exit 1
 
   client:
     # 前端以前完全不在流水线里：vue-tsc / vitest / build 全绿才说明客户端能装出来，

@@ -863,3 +863,129 @@ def test_diagnostics_download_is_a_zip(sc, configured, tmp_path, monkeypatch):
     resp = sc.get("/diagnostics")
     assert resp.status_code == 200
     assert resp.data.startswith(b"PK"), "必须是 zip 流，否则员工拿到一堆乱码"
+
+
+# ========== 打开文件夹：只许白名单内的目录 ==========
+# sidecar 绑在 127.0.0.1，能在这台机器上发 POST 的东西（哪怕只是一段网页 fetch）
+# 都能借 /open-folder 把任意目录弹到员工屏幕上。危害有限，但一条白名单就堵住了。
+
+def _open_folder(sc, path: str = ""):
+    url = "/open-folder" if not path else f"/open-folder?path={path}"
+    return sc.post(url)
+
+
+def test_is_inside_rejects_sibling_with_same_prefix(tmp_path):
+    """`C://期刊录用2` 不是 `C://期刊录用` 的子目录——单纯的 startswith 会判错。
+    员工把输出目录改到相邻目录时，按钮会莫名其妙打不开，还查不出原因。"""
+    from client.sidecar.routes_shell import _is_inside
+
+    root = tmp_path / "期刊录用"
+    root.mkdir()
+    sibling = tmp_path / "期刊录用2"
+    sibling.mkdir()
+    assert _is_inside(sibling, [root]) is False
+
+
+def test_is_inside_accepts_root_itself_and_subdirs(tmp_path):
+    from client.sidecar.routes_shell import _is_inside
+
+    root = tmp_path / "out"
+    (root / "2026-10-24").mkdir(parents=True)
+    assert _is_inside(root, [root]) is True
+    assert _is_inside(root / "2026-10-24", [root]) is True
+
+
+def test_is_inside_rejects_parent_of_root(tmp_path):
+    from client.sidecar.routes_shell import _is_inside
+
+    root = tmp_path / "out" / "deep"
+    root.mkdir(parents=True)
+    assert _is_inside(tmp_path / "out", [root]) is False
+
+
+def test_is_inside_rejects_traversal_that_escapes(tmp_path):
+    """`out/..\\..\\Windows` 这种串：比较的是规范化后的绝对路径，绕不出去"""
+    from client.sidecar.routes_shell import _is_inside
+
+    root = tmp_path / "out"
+    root.mkdir()
+    escaped = Path(str(root)) / ".." / ".." / "Windows"
+    assert _is_inside(escaped, [root]) is False
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="打开目录走 os.startfile，POSIX 上没有该函数（客户端只跑 Windows）",
+)
+def test_open_folder_allows_output_dir(sc, configured, monkeypatch, tmp_path):
+    import os
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+
+    resp = _open_folder(sc, str(tmp_path))
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert len(opened) == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="打开目录走 os.startfile")
+def test_open_folder_defaults_to_output_dir(sc, configured, monkeypatch, tmp_path):
+    """不传 path 时打开输出目录——这是「打开本机输出目录」按钮的调用方式"""
+    import os
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+
+    assert _open_folder(sc).get_json()["ok"] is True
+    assert opened
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="打开目录走 os.startfile")
+def test_open_folder_opens_parent_when_given_a_file(sc, configured, monkeypatch, tmp_path):
+    """传进来的是成品图路径时打开它所在目录，不是去"打开"那个 jpg"""
+    import os
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+    img = tmp_path / "李四.jpg"
+    img.write_bytes(b"x")
+
+    assert _open_folder(sc, str(img)).get_json()["ok"] is True
+    assert opened == [str(img.parent)]
+
+
+def test_open_folder_rejects_outside_path(sc, configured, tmp_path):
+    """白名单外的目录必须拒绝——提示要能让人看懂，不能只说"失败"。"""
+    outside = tmp_path.parent / "别的地方"
+    outside.mkdir(exist_ok=True)
+    resp = _open_folder(sc, str(outside))
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert "只能打开" in body["error"]
+
+
+def test_open_folder_rejects_system_dir(sc, configured):
+    resp = _open_folder(sc, "C:/Windows/System32")
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_open_folder_rejects_traversal_from_output_dir(sc, configured, tmp_path):
+    resp = _open_folder(sc, str(tmp_path) + "/../../../Windows")
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="打开目录走 os.startfile")
+def test_open_folder_allows_app_data_dir(sc, configured, monkeypatch):
+    """日志/诊断包目录本身也在白名单里（设置页要能打开它们）"""
+    import os
+
+    from client.sidecar.config import app_data_dir
+
+    opened: list[str] = []
+    monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
+
+    assert _open_folder(sc, str(app_data_dir())).get_json()["ok"] is True

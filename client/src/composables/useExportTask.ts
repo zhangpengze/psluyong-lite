@@ -87,6 +87,30 @@ export function useExportTask(opts: ExportTaskOptions) {
     })
   }
 
+  /**
+   * 记住这次的组合（模板/伙伴/作者），下次打开自动带出。
+   *
+   * 这一步是**顺手**的便利，不是生成的组成部分，所以它失败绝不能影响结论：
+   * 图已经落在输出目录里、记录也已经上报了。原来这一句和成功分支在同一个
+   * try 里，`saveConfig` 一抛（磁盘满 / 文件被占用 / 配置被别处改坏）就落进
+   * catch，把 `result` 改成失败——员工看到"生成失败"必然再点一次，撞上 409
+   * （当天重复提交），白跑一轮 Photoshop，还多一条 failed 污染失败率。
+   *
+   * 也不给 toast：告诉员工"上次用的作者没记住"除了让他焦虑没有任何用，
+   * 控制台留一行就够开发看。
+   */
+  async function rememberThisCombo() {
+    try {
+      await api.saveConfig({
+        last_template_id: opts.templateId.value,
+        last_partner: opts.partner.value,
+        last_author: opts.author.value.trim(),
+      })
+    } catch (e) {
+      console.warn('记住上次用的模板/作者失败（不影响本次生成）', e)
+    }
+  }
+
   async function submit() {
     if (!opts.canStart()) return
 
@@ -118,12 +142,7 @@ export function useExportTask(opts: ExportTaskOptions) {
 
       if (finalRes.ok) {
         opts.onExported()
-        // 记住这次的组合（作者也记，下次打开自动带出）
-        await api.saveConfig({
-          last_template_id: opts.templateId.value,
-          last_partner: opts.partner.value,
-          last_author: opts.author.value.trim(),
-        })
+        await rememberThisCombo()
         if (opts.config()?.auto_clear) {
           opts.author.value = ''
           opts.title.value = ''

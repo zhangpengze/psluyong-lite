@@ -7,6 +7,7 @@ _client 由 create_sidecar 晚绑定传入（monkeypatch 兼容见 server.py）�
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,50 @@ from flask import Flask, jsonify, request
 
 from . import queue
 from .config import load_config
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve(path: Path) -> Path:
+    """尽力规范化成绝对真实路径。盘符不存在 / 权限不足时 resolve() 会抛，
+    退回 absolute()——比这里炸掉更合理，后面的白名单比较仍然有效。"""
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _allowed_open_roots(cfg) -> list[Path]:
+    """「打开文件夹」允许落地的根目录：输出目录、模板目录、本机数据目录。
+
+    只放这三个地方，是因为这个按钮的所有正当用途都在里面：生成完打开成品
+    所在目录、记录页打开输出目录、诊断包/日志目录。多放一个根，就多一条
+    "把本机任意目录（含系统目录）打开给调用方看"的路。
+    """
+    from .config import app_data_dir
+
+    roots: list[Path] = []
+    for raw in (cfg.output_dir, getattr(cfg, "template_dir", "")):
+        text = (raw or "").strip()
+        if text:
+            roots.append(_resolve(Path(text)))
+    roots.append(_resolve(app_data_dir()))
+    return roots
+
+
+def _is_inside(target: Path, roots: list[Path]) -> bool:
+    """target 是否落在某个允许的根目录里（根本身也算）。
+
+    比的是规范化后的绝对路径，所以 `..\\..\\Windows` 这类串没用；
+    Windows 路径大小写不敏感，用 normcase 归一，否则 `D:\\期刊录用` 与
+    `d:\\期刊录用` 会被判成两个地方。
+    """
+    real = os.path.normcase(str(_resolve(target)))
+    for root in roots:
+        base = os.path.normcase(str(root))
+        if real == base or real.startswith(base + os.sep):
+            return True
+    return False
 
 
 def _diagnostics_dir() -> Path:
@@ -40,12 +85,25 @@ def register_shell_routes(app: Flask, _client) -> None:
     # ========== 打开目录 / 日志 ==========
     @app.post("/open-folder")
     def open_folder():
-        """生成后"打开文件夹"按钮"""
+        """生成后"打开文件夹"按钮。
+
+        路径来自前端（成品图所在目录），所以必须卡白名单：本机 sidecar 绑在
+        127.0.0.1，任何能在这台机器上发 POST 的程序（哪怕只是网页里的一段
+        fetch）都能借这个接口把任意目录打开在员工屏幕上。危害不算大，但一条
+        白名单就堵住了，没有理由不做。
+        """
         cfg = load_config()
-        raw = request.args.get("path") or cfg.output_dir
+        raw = (request.args.get("path") or cfg.output_dir or "").strip()
+        if not raw:
+            return jsonify({"ok": False, "error": "还没设置输出目录"}), 400
         target = Path(raw)
         if target.is_file():
             target = target.parent
+        if not _is_inside(target, _allowed_open_roots(cfg)):
+            logger.warning("拒绝打开白名单外的目录：%s", raw)
+            return jsonify(
+                {"ok": False, "error": "只能打开本机的输出目录、模板目录或日志目录"}
+            ), 400
         try:
             if sys.platform == "win32":
                 os.startfile(target)  # type: ignore[attr-defined]

@@ -657,6 +657,53 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
+/// 把主窗"拿给员工看"要做哪几步。
+///
+/// 抽成纯函数是因为窗口操作在测试里跑不起来（需要真窗口），而这几步的**顺序
+/// 与"绝不隐藏"**才是要紧的地方：先还原再显示，最后一定聚焦。
+#[derive(Debug, PartialEq, Eq)]
+enum ShowStep {
+    Unminimize,
+    Show,
+    Focus,
+}
+
+fn show_steps(minimized: bool, visible: bool) -> Vec<ShowStep> {
+    let mut steps = Vec::new();
+    if minimized {
+        steps.push(ShowStep::Unminimize);
+    }
+    if !visible {
+        steps.push(ShowStep::Show);
+    }
+    // 已经显示着也要聚焦：窗口可能被别的程序压在下面，
+    // 员工双击图标就是想让它到前面来
+    steps.push(ShowStep::Focus);
+    steps
+}
+
+/// 显示并聚焦主窗。**永远不隐藏。**
+///
+/// 与 `toggle_main_window` 的区别不是风格问题：双击桌面图标的意思是"把窗口给
+/// 我看"。用 toggle 的写法，员工上一次用托盘/快捷键把窗口收起来之后，再双击
+/// 图标反而会把它继续藏着——看起来就是"软件点了没反应"，然后再双击一次又
+/// 冒出来，来回横跳。托盘菜单里的「显示/隐藏主窗」才该是 toggle 语义。
+fn show_main_window(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window("main") {
+        let steps = show_steps(
+            main.is_minimized().unwrap_or(false),
+            main.is_visible().unwrap_or(false),
+        );
+        for step in steps {
+            let _ = match step {
+                ShowStep::Unminimize => main.unminimize(),
+                ShowStep::Show => main.show(),
+                ShowStep::Focus => main.set_focus(),
+            };
+        }
+    }
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
@@ -734,7 +781,7 @@ fn broadcast_event(app: AppHandle, name: String, payload: serde_json::Value) {
 
 // ==================== 单实例 ====================
 
-/// 首实例监听双开通知：第二个实例连上发 "show"，这里把主窗显示出来
+/// 首实例监听双开通知：第二个实例连上发 "show"，这里把主窗拿给员工看
 fn spawn_instance_listener(app: &AppHandle) {
     let Some(listener) = INSTANCE_LISTENER.get() else {
         return;
@@ -748,7 +795,9 @@ fn spawn_instance_listener(app: &AppHandle) {
             if let Ok(mut stream) = stream {
                 let mut buf = [0u8; 16];
                 let _ = stream.read(&mut buf);
-                toggle_main_window(&app2);
+                // 只能是"显示"，不能是 toggle：双击图标时窗口若正好是显示的，
+                // toggle 会把它藏起来，员工看到的是"点了没反应"
+                show_main_window(&app2);
             }
         }
     });
@@ -939,5 +988,63 @@ mod dock_tests {
                 "底部不该成为候选，实际返回 {side}"
             );
         }
+    }
+}
+
+// ==================== 单实例：第二个实例只许"显示" ====================
+// 员工双击桌面图标 = "把窗口给我看"。原来这里复用了托盘的 toggle：
+// 窗口正好显示着时，双击图标会把它藏起来，看起来就是"点了没反应"，
+// 再双击一次又冒出来，来回横跳。窗口操作要真窗口，所以把步骤抽成纯函数验。
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    #[test]
+    fn 四种可见性组合都以聚焦收尾() {
+        for (minimized, visible) in [(false, false), (false, true), (true, false), (true, true)] {
+            let steps = show_steps(minimized, visible);
+            assert_eq!(
+                steps.last(),
+                Some(&ShowStep::Focus),
+                "minimized={minimized} visible={visible} 的最后一步必须是聚焦"
+            );
+        }
+    }
+
+    #[test]
+    fn 已经显示且未最小化时只聚焦不重复show() {
+        // 这一条就是 bug 的形状：旧实现走 toggle 分支会去 hide
+        assert_eq!(show_steps(false, true), vec![ShowStep::Focus]);
+    }
+
+    #[test]
+    fn 最小化时先还原再聚焦() {
+        assert_eq!(show_steps(true, true), vec![ShowStep::Unminimize, ShowStep::Focus]);
+    }
+
+    #[test]
+    fn 藏起来时必须show() {
+        assert_eq!(show_steps(false, false), vec![ShowStep::Show, ShowStep::Focus]);
+    }
+
+    #[test]
+    fn 最小化且不可见时还原_显示_聚焦() {
+        assert_eq!(
+            show_steps(true, false),
+            vec![ShowStep::Unminimize, ShowStep::Show, ShowStep::Focus]
+        );
+    }
+
+    #[test]
+    fn 双开监听器不许调到托盘那个切换() {
+        // 别的地方改不回来：这一条盯的是"用错函数"，纯逻辑测试看不出来
+        let src = include_str!("lib.rs");
+        let bad = format!("toggle_main_window(&{})", "app2");
+        assert!(
+            !src.contains(&bad),
+            "第二个实例必须显示主窗；复用 toggle 会让双击图标把窗口藏起来"
+        );
+        let good = format!("show_main_window(&{})", "app2");
+        assert!(src.contains(&good), "第二个实例应当调用 show_main_window");
     }
 }

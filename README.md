@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               780 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               791 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -121,7 +121,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（780 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（791 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -190,6 +190,9 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 | 公司电脑配了系统代理，记录永远传不上去 | sidecar 对内网的请求统一走 `net.get`/`net.request`，显式 `proxies={"http": None, "https": None}` 绕开环境代理 | `requests` 默认读 `HTTP_PROXY`：代理不认识内网 IP，回一个 502，员工侧永远"连接失败"，运维在自己机器上（没配代理）复现不出来。外部 webhook 不在此列，该走代理就走 |
 | 上线检查清单靠人肉勾选 | `scripts/preflight_check.py`：机器能判的九项自动判（密钥非示例值/目录可写/WAL/备份存在/图片目录/第二份镜像/调度器/仓库无 `.env`/就绪探针），三态输出，有 FAIL 就退出码 1 | 勾的人未必真跑过，跑过的人下次不记得哪几条；机器判不了的（PS 版本、跑通一张图、备份演练）单独列成 7 条人工项，人的注意力留给真正需要判断的事 |
 | 员工不会读状态行，每次都问主管 | [docs/员工手册.md](docs/员工手册.md)：一页纸，先开 PS → 四步出图 → 断网会怎样 → 卡住了查表 → 导诊断包找谁 | 九成故障是"PS 没开"和"PS 弹了窗"，写清楚这两条就砍掉一半客服；手册里的按钮名和屏幕文案由 `tests/test_employee_handbook.py` 对着源码校验，界面改了名字手册会红 |
+| 双击桌面图标把窗口藏起来 | 第二个实例只调 `show_main_window`（还原 → 显示 → 聚焦），托盘菜单才用 toggle | 员工双击图标的意思是"把窗口给我看"。原来复用托盘的 toggle：窗口正显示着时双击反而把它藏起来，看起来就是"点了没反应"，再双击又冒出来——最容易被当成"软件坏了"的一类症状 |
+| "记住上次用的作者"写失败被当成生成失败 | 这一步单独 try/catch，失败只打控制台 | 图已经导出、记录已经上报，只差写一行配置。它在主 try 里时，`saveConfig` 一抛（磁盘满/被占用）就把结论翻成失败，员工看到失败必然再点一次 → 撞 409（当天重复提交）→ 白跑一轮 PS，还多一条 failed 污染失败率 |
+| `/open-folder` 能打开任意目录 | 白名单：只许输出目录、模板目录、数据目录，路径 `resolve()` 后按 `os.sep` 边界比对 | sidecar 绑 127.0.0.1，任何能发 POST 的东西（哪怕一段网页 fetch）都能借它把任意目录弹到员工屏幕上。用 `normcase` 处理大小写，用 `base + os.sep` 避免 `期刊录用2` 被当成 `期刊录用` 的子目录 |
 
 ## 部署
 

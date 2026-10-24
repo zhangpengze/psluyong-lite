@@ -38,14 +38,18 @@ def preview():
 @admin_required
 @csrf_protect
 def run():
-    """手动生成并推送（补跑某天日报时用）"""
+    """手动生成并推送（补跑某天日报时用）
+
+    force=True：这是"我要现在再推一次"的显式动作，必须绕过幂等闸门——
+    否则刚推过的那天点了按钮什么都没发生，看起来像坏了。
+    """
     from bot.report import run_daily
 
     payload = request.get_json(silent=True) or {}
     day = _parse_day(payload.get("date"))
     push = bool(payload.get("push", True))
 
-    result = run_daily(current_app, day, push=push, record_status=push)
+    result = run_daily(current_app, day, push=push, record_status=push, force=push)
     logger.info("手动触发日报 date=%s push=%s result=%s", day, push, result["message"])
     log_action(
         "push_report" if push else "run_report",

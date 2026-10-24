@@ -7,7 +7,10 @@
 <div class="page-head">
   <div>
     <h1>每日日报</h1>
-    <div class="sub">每天 {{ report_schedule }} 定时生成并推送到 QQ 群 · 这里可回看历史</div>
+    <div class="sub">
+      每天 {{ report_schedule }} 推送当日快报，次日 {{ final_schedule }} 自动核对并补推「终版」
+      （18:00 之后补录的记录在终版里）· 这里可回看历史
+    </div>
   </div>
   <div class="actions">
     {% if content %}
@@ -32,7 +35,9 @@
              {% if f == selected %}aria-current="true"{% endif %}>
             <span>{{ f[:-3] }}</span>
             {% if st %}
-              <span class="tag {{ 'ok' if st.pushed else 'bad' }}">{{ '已推送' if st.pushed else '未推送' }}</span>
+              <span class="tag {{ 'ok' if st.pushed else 'bad' }}">
+                {{ ('已推送·终版' if st.final else '已推送') if st.pushed else '未推送' }}
+              </span>
             {% else %}
               <span class="tag mute">无记录</span>
             {% endif %}

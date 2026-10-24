@@ -85,10 +85,12 @@ def _run_daily_job(sched) -> None:
 
 # ---------- 调度器注册 / 生命周期 ----------
 
-def test_start_registers_two_jobs_on_config_schedule(app, backend, monkeypatch):
-    """注册契约：日报/夜维按 Config 时点挂载，错过 1 小时内补跑"""
+def test_start_registers_three_jobs_on_config_schedule(app, backend, monkeypatch):
+    """注册契约：日报 / 终版巡检 / 夜维按 Config 时点挂载"""
     monkeypatch.setattr(Config, "DAILY_REPORT_HOUR", 6)
     monkeypatch.setattr(Config, "DAILY_REPORT_MINUTE", 30)
+    monkeypatch.setattr(Config, "REPORT_FINAL_HOUR", 9)
+    monkeypatch.setattr(Config, "REPORT_FINAL_MINUTE", 5)
     monkeypatch.setattr(Config, "BACKUP_HOUR", 4)
     monkeypatch.setattr(Config, "BACKUP_MINUTE", 15)
 
@@ -96,15 +98,17 @@ def test_start_registers_two_jobs_on_config_schedule(app, backend, monkeypatch):
 
     assert sched.started is True
     assert str(sched.timezone) == Config.TZ
-    assert set(sched.jobs) == {"daily_report", "nightly_maintenance"}
+    assert set(sched.jobs) == {"daily_report", "report_patrol", "nightly_maintenance"}
     # cron 时点必须来自 Config（防止写死后配了不生效）
     assert _cron_hm(sched.jobs["daily_report"]["trigger"]) == ("6", "30")
+    assert _cron_hm(sched.jobs["report_patrol"]["trigger"]) == ("9", "5")
     assert _cron_hm(sched.jobs["nightly_maintenance"]["trigger"]) == ("4", "15")
     # 夜维任务挂的是真实函数（防止注册了空壳）
     assert sched.jobs["nightly_maintenance"]["func"] is scheduler_mod.nightly_job
     assert callable(sched.jobs["daily_report"]["func"])
+    assert callable(sched.jobs["report_patrol"]["func"])
     for job in sched.jobs.values():
-        assert job["misfire_grace_time"] == 3600  # 重启错过时点 1h 内补跑
+        assert job["misfire_grace_time"] == 3600
         assert job["coalesce"] is True            # 连续错过只补跑一次
 
 
@@ -114,7 +118,7 @@ def test_duplicate_start_is_ignored(app, backend):
     scheduler_mod.start_scheduler(app)
 
     assert len(backend) == 1
-    assert set(backend[0].jobs) == {"daily_report", "nightly_maintenance"}
+    assert set(backend[0].jobs) == {"daily_report", "report_patrol", "nightly_maintenance"}
 
 
 def test_start_warns_when_no_mirror_configured(app, backend, monkeypatch, caplog):
@@ -195,6 +199,75 @@ def test_daily_job_swallows_exception_and_alerts(app, backend, ops_alerts, monke
     title, detail = ops_alerts[0]
     assert title == "定时日报生成异常"
     assert "RuntimeError" in detail and "database is locked" in detail
+    assert len(detail) <= 200
+
+
+# ---------- 次日终版巡检 job ----------
+
+def _run_patrol_job(sched) -> None:
+    sched.jobs["report_patrol"]["func"]()
+
+
+def test_patrol_job_quiet_on_success(app, backend, ops_alerts, monkeypatch):
+    """补推成功：只跑巡检，不发告警"""
+    calls = []
+    monkeypatch.setattr(
+        scheduler_mod, "patrol",
+        lambda a, today=None: calls.append(a) or {
+            "date": "2026-10-20", "pushed": True, "skipped": False,
+            "message": "推送成功", "missing": [],
+        },
+    )
+    _run_patrol_job(_start(app, backend))
+
+    assert calls == [app]
+    assert ops_alerts == []
+
+
+def test_patrol_job_quiet_when_nothing_changed(app, backend, ops_alerts, monkeypatch):
+    """内容没变（skipped）：一条消息都没发，不算失败，不该告警"""
+    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
+    monkeypatch.setattr(
+        scheduler_mod, "patrol",
+        lambda a, today=None: {
+            "date": "2026-10-20", "pushed": True, "skipped": True,
+            "message": "内容与已推送版本一致，已跳过重复推送", "missing": [],
+        },
+    )
+    _run_patrol_job(_start(app, backend))
+
+    assert ops_alerts == []
+
+
+def test_patrol_job_alerts_when_final_push_failed(app, backend, ops_alerts, monkeypatch):
+    """终版补推失败：必须告警（群里缺的就是昨天那份终版）"""
+    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
+    monkeypatch.setattr(
+        scheduler_mod, "patrol",
+        lambda a, today=None: {
+            "date": "2026-10-20", "pushed": False, "skipped": False,
+            "message": "推送被 OneBot 拒绝: GROUP_NOT_FOUND", "missing": [],
+        },
+    )
+    _run_patrol_job(_start(app, backend))
+
+    assert ops_alerts == [
+        ("日报终版补推失败", "日期 2026-10-20｜推送被 OneBot 拒绝: GROUP_NOT_FOUND")
+    ]
+
+
+def test_patrol_job_swallows_exception_and_alerts(app, backend, ops_alerts, monkeypatch):
+    """巡检抛异常：任务不能死，告警详情截断在 200 字符内"""
+    def boom(*a, **k):
+        raise RuntimeError("database is locked " * 30)
+
+    monkeypatch.setattr(scheduler_mod, "patrol", boom)
+    _run_patrol_job(_start(app, backend))
+
+    assert len(ops_alerts) == 1
+    title, detail = ops_alerts[0]
+    assert title == "日报巡检异常"
+    assert "RuntimeError" in detail
     assert len(detail) <= 200
 
 

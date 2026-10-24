@@ -59,6 +59,15 @@ class Config:
     # 日报
     DAILY_REPORT_HOUR = int(os.getenv("DAILY_REPORT_HOUR", "18"))
     DAILY_REPORT_MINUTE = int(os.getenv("DAILY_REPORT_MINUTE", "0"))
+    # 次日终版巡检时点。18:00 推出去的是「当日快报」，18:00 之后员工加班补录的
+    # 记录（work_date 仍是当天）不在里面；第二天这个点重算一遍才是终版——
+    # 内容变了才补推「（终版）」，没变一条消息都不发。
+    # 同时兜住"18:00 服务没起来、当天完全没推"：这是 MemoryJobStore 补不回来的。
+    REPORT_FINAL_HOUR = int(os.getenv("REPORT_FINAL_HOUR", "8"))
+    REPORT_FINAL_MINUTE = int(os.getenv("REPORT_FINAL_MINUTE", "30"))
+    # 巡检时往前看几天找"没推成功的日报"，只汇总成一条运维告警，
+    # 不自动往群里补推（否则一次宕机 5 天，群里会被 5 份旧日报淹没）
+    REPORT_MISS_LOOKBACK_DAYS = int(os.getenv("REPORT_MISS_LOOKBACK_DAYS", "7"))
     NAPCAT_WEBHOOK = os.getenv("NAPCAT_WEBHOOK", "").strip()
     NAPCAT_TOKEN = os.getenv("NAPCAT_TOKEN", "").strip()
     REPORT_GROUP_ID = os.getenv("REPORT_GROUP_ID", "").strip()

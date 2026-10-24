@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, datetime, timedelta
 
@@ -62,11 +63,24 @@ def _fake_backup(dirs, age_hours: float):
     return path
 
 
-def _push_status(dirs, pushed: bool, message: str = ""):
-    yesterday = date.today() - timedelta(days=1)
-    path = dirs["reports"] / f"{yesterday:%Y-%m-%d}.status.json"
+def _due_day():
+    """仪表盘"日报"那一行查的是哪一天——按推送时点算，不是固定昨天。
+
+    独立实现一遍（不 import 生产函数）：夹具要把文件放到"代码会去看的位置"，
+    复用同一个函数会让"到底该查哪天"这条逻辑失去被验证的机会。
+    """
+    from server.app.config import Config
+
+    now = datetime.now()
+    due = (now.hour, now.minute) >= (Config.DAILY_REPORT_HOUR, Config.DAILY_REPORT_MINUTE)
+    return now.date() if due else now.date() - timedelta(days=1)
+
+
+def _push_status(dirs, pushed: bool, message: str = "", final: bool = False):
+    day = _due_day()
+    path = dirs["reports"] / f"{day:%Y-%m-%d}.status.json"
     path.write_text(
-        '{"pushed": %s, "message": "%s"}' % ("true" if pushed else "false", message),
+        json.dumps({"pushed": pushed, "message": message, "final": final}, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -183,6 +197,32 @@ def test_report_failed_is_bad_with_reason(admin_client, clean_db, sys_dirs, monk
     assert rows["report"]["status"] == "bad"
     assert "推送失败" in rows["report"]["detail"]
     assert "连接超时" in rows["report"]["detail"]
+
+
+def test_report_final_is_marked(admin_client, clean_db, sys_dirs, monkeypatch):
+    """出过终版的日报要能看出来（快报 vs 终版，内容不一样，别让人以为推重了）"""
+    from server.app.config import Config
+
+    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.fake/webhook")
+    _push_status(sys_dirs, pushed=True, final=True)
+    rows = _rows(admin_client)
+    assert rows["report"]["status"] == "ok"
+    assert "终版" in rows["report"]["detail"]
+
+
+@pytest.mark.parametrize(
+    "hour,minute,days_back",
+    [(17, 59, 1), (18, 0, 0), (18, 30, 0), (9, 0, 1)],
+)
+def test_report_row_checks_the_day_that_should_be_pushed(monkeypatch, hour, minute, days_back):
+    """过了推送时点就看今天，没过就看昨天——旧实现固定看昨天，18:00 没推成
+    要等 24 小时才变黄点"""
+    from server.app.config import Config
+
+    monkeypatch.setattr(Config, "DAILY_REPORT_HOUR", 18)
+    monkeypatch.setattr(Config, "DAILY_REPORT_MINUTE", 0)
+    now = datetime(2026, 10, 24, hour, minute)
+    assert status_mod._due_day(now) == date(2026, 10, 24 - days_back)
 
 
 # ---------- 图片存储分档 ----------

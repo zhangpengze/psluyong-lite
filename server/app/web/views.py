@@ -235,6 +235,7 @@ def reports():
         content=content,
         statuses=statuses,
         report_schedule="%02d:%02d" % (Config.DAILY_REPORT_HOUR, Config.DAILY_REPORT_MINUTE),
+        final_schedule="%02d:%02d" % (Config.REPORT_FINAL_HOUR, Config.REPORT_FINAL_MINUTE),
     )
 
 

@@ -1,15 +1,21 @@
-"""定时任务：每天固定时间推送日报 + 夜间维护（备份 / 图片镜像 / 磁盘告警）
+"""定时任务：日报推送 / 次日终版巡检 / 夜间维护（备份 / 图片镜像 / 磁盘告警）
 
 夜间维护为什么合成一个 job：
     备份、镜像、磁盘检查是同一件事的几个步骤，分别排期会出现"备份跑完了但
     镜像还没开始"的时间窗。合成一个 job 之后，任一步失败都能立刻带着上下文告警，
     日志里也只有一个时间段要查。
+
+日报为什么是两个 job（18:00 推快报 + 次日 08:30 补终版）：
+    见 bot/report_patrol.py 的文件头——18:00 之后的补录、以及"18:00 服务没起来"
+    这两种情况都不是同一个 job 重跑能解决的。
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+
+from .report_patrol import patrol
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +94,38 @@ def start_scheduler(app) -> None:
             logger.exception("定时日报执行失败")
             push_ops_alert("定时日报生成异常", f"{type(e).__name__}: {e}"[:200])
 
+    def patrol_job() -> None:
+        """次日巡检：补昨天的终版（内容没变就不发），并报更早的缺口。
+
+        缺口告警由 patrol 自己发（它知道是哪几天），这里只管"这次补推失败了"。
+        """
+        try:
+            result = patrol(app)
+            if Config.NAPCAT_WEBHOOK and not result["pushed"] and not result["skipped"]:
+                push_ops_alert(
+                    "日报终版补推失败", f"日期 {result['date']}｜{result['message']}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("日报巡检执行失败")
+            push_ops_alert("日报巡检异常", f"{type(e).__name__}: {e}"[:200])
+
     _scheduler = BackgroundScheduler(timezone=Config.TZ)
     _scheduler.add_job(
         job,
         CronTrigger(hour=Config.DAILY_REPORT_HOUR, minute=Config.DAILY_REPORT_MINUTE),
         id="daily_report",
         replace_existing=True,
-        misfire_grace_time=3600,  # 服务重启错过时间点，一小时内仍补跑
+        # 只在"进程活着但被卡住"时有意义。进程重启后 job 根本不在 MemoryJobStore
+        # 里，这个参数救不了——那种情况由 report_patrol 兜（次日发现并补推）。
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        patrol_job,
+        CronTrigger(hour=Config.REPORT_FINAL_HOUR, minute=Config.REPORT_FINAL_MINUTE),
+        id="report_patrol",
+        replace_existing=True,
+        misfire_grace_time=3600,
         coalesce=True,
     )
     _scheduler.add_job(
@@ -107,9 +138,11 @@ def start_scheduler(app) -> None:
     )
     _scheduler.start()
     logger.info(
-        "调度器已启动：日报每天 %02d:%02d，夜间维护每天 %02d:%02d（%s）",
+        "调度器已启动：日报每天 %02d:%02d、终版巡检每天 %02d:%02d、夜间维护每天 %02d:%02d（%s）",
         Config.DAILY_REPORT_HOUR,
         Config.DAILY_REPORT_MINUTE,
+        Config.REPORT_FINAL_HOUR,
+        Config.REPORT_FINAL_MINUTE,
         Config.BACKUP_HOUR,
         Config.BACKUP_MINUTE,
         Config.TZ,

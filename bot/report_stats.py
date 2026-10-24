@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date
 
 from sqlalchemy import func
@@ -98,3 +100,30 @@ def _collect_stats(app, start: date, end: date) -> dict:
         "by_day": [(d, c) for d, c in by_day],
         "failed_rows": failed_rows,
     }
+
+
+def stats_fingerprint(stats: dict) -> str:
+    """数据指纹：内容变没变，只看**数据**，不看渲染出来的文字。
+
+    为什么不用正文哈希：正文里有「生成时间：」和「（终版）」标记，
+    同一天的同一批数据每次渲染都长得不一样，拿正文比就永远"变了"，
+    次日终版会把一份没变化的日报再推一遍。
+
+    也正因为指纹只认数据，18:00 之后补录的记录（total/明细变了）会让指纹变，
+    这正是"该补推终版"的判据。
+    """
+    payload = {
+        "start": stats["start"].isoformat(),
+        "end": stats["end"].isoformat(),
+        "total": stats["total"],
+        "failed": stats["failed"],
+        "by_day": [[d.isoformat(), c] for d, c in stats["by_day"]],
+        "by_template": [list(x) for x in stats["by_template"]],
+        "by_partner": [list(x) for x in stats["by_partner"]],
+        "partner_templates": {k: [list(v) for v in vs] for k, vs in stats["partner_templates"].items()},
+        "failed_rows": [
+            [r.employee_name, r.author, r.title, r.error_message or ""] for r in stats["failed_rows"]
+        ],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

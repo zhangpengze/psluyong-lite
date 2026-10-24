@@ -28,8 +28,9 @@ from .report_alert import (
     reset_alert_throttle,
     reset_ops_alert_throttle,
 )
-from .report_stats import _collect_stats
-from .report_store import save_push_status, save_report
+from .report_render import render
+from .report_stats import _collect_stats, stats_fingerprint
+from .report_store import load_push_status, save_push_status, save_report
 
 logger = logging.getLogger(__name__)
 
@@ -43,65 +44,15 @@ PUSH_BACKOFF_S = (5, 15)
 PARTNER_TEMPLATE_LIMIT = 5
 
 
-def _render(stats: dict) -> str:
-    start, end = stats["start"], stats["end"]
-    total, failed = stats["total"], stats["failed"]
-    multi = start != end
-
-    title = (
-        f"【{start:%Y-%m-%d} ~ {end:%Y-%m-%d} 期刊录用汇总】"
-        if multi
-        else f"【{start:%Y-%m-%d} 期刊录用日报】"
-    )
-    lines = [
-        title,
-        "",
-        f"总录用：{total} 条　成功：{total - failed}　失败：{failed}"
-        + (f"　成功率：{(total - failed) / total * 100:.1f}%" if total else ""),
-        "",
-    ]
-
-    # 区间版才需要按日拆分：只看合计数看不出是哪天忙哪天空
-    if multi and stats["by_day"]:
-        lines.append("按日：")
-        lines += [f"  · {d:%m-%d}：{c} 条" for d, c in stats["by_day"]]
-        lines.append("")
-
-    if stats["by_template"]:
-        lines.append("按模板：")
-        lines += [f"  · {name}：{count} 条" for name, count in stats["by_template"]]
-        lines.append("")
-
-    if stats["by_partner"]:
-        lines.append("按合作伙伴：")
-        for name, count in stats["by_partner"]:
-            lines.append(f"  · {name}：{count} 条")
-            details = stats["partner_templates"].get(name, [])
-            for tname, tcount in details[:PARTNER_TEMPLATE_LIMIT]:
-                lines.append(f"    - {tname}：{tcount} 条")
-            hidden = len(details) - PARTNER_TEMPLATE_LIMIT
-            if hidden > 0:
-                lines.append(f"    - 等 {hidden} 个模板")
-        lines.append("")
-
-    if stats["failed_rows"]:
-        lines.append(f"失败明细（最近 {len(stats['failed_rows'])} 条）：")
-        for r in stats["failed_rows"]:
-            reason = (r.error_message or "未知原因")[:60]
-            lines.append(f"  · {r.employee_name}｜{r.author}/{r.title}：{reason}")
-        lines.append("")
-
-    if total == 0:
-        lines.append("这段时间没有录用记录。")
-
-    lines.append(f"生成时间：{datetime.now():%Y-%m-%d %H:%M}")
-    return "\n".join(lines)
+def _render(stats: dict, final: bool = False) -> str:
+    """渲染入口保留在本模块：PARTNER_TEMPLATE_LIMIT 是测试打桩面，必须现读"""
+    return render(stats, final=final, partner_limit=PARTNER_TEMPLATE_LIMIT)
 
 
-def build_daily_report(app, day: date | None = None) -> str:
+def build_daily_report(app, day: date | None = None, final: bool = False) -> str:
     """生成某天的日报（区间版的特例，保持原签名）"""
     day = day or date.today()
-    return _render(_collect_stats(app, day, day))
+    return _render(_collect_stats(app, day, day), final=final)
 
 
 def build_period_report(app, start: date, end: date) -> str:
@@ -232,24 +183,76 @@ def push_to_user(user_id: int | str, content: str) -> tuple[bool, str]:
     return _post_with_retry("send_private_msg", payload, f"私聊推送 {user_id}")
 
 
-def run_daily(app, day: date | None = None, push: bool = True, record_status: bool = True) -> dict:
+def run_daily(
+    app,
+    day: date | None = None,
+    push: bool = True,
+    record_status: bool = True,
+    force: bool = False,
+    final: bool = False,
+) -> dict:
     """生成 + 存档 + 推送 + 记录推送状态。返回结构化结果供接口/定时任务使用。
 
     record_status=False 时不覆盖 reports/<日期>.status.json——
     群内指令触发（不推群）不能把定时推送的「已推送」徽标刷成「未推送」。
+
+    幂等闸门（force=False 时生效）：如果这一天已经推送成功，且**数据指纹没变**，
+    就直接跳过推送。它挡掉三种真实场景：
+      - 服务重启后 job 重跑（同一天两条一模一样的日报）
+      - 多实例/重复部署同时触发
+      - 次日终版巡检时，昨天其实一次都没补录
+    手点「重推此日报」必须 force=True，否则按钮点了没反应。
+
+    final=True 表示"次日终版"：18:00 之后补录的记录这才进得来。
     """
     day = day or date.today()
-    content = build_daily_report(app, day)
+    stats = _collect_stats(app, day, day)
+    content = _render(stats, final=final)
     path = save_report(app, content, day)
-    pushed, message = (False, "未推送") if not push else push_to_group(content)
+    fingerprint = stats_fingerprint(stats)
+    prev = load_push_status(day)
+
+    if not push:
+        pushed, message, skipped = False, "未推送", False
+    elif not force and prev.get("pushed") and prev.get("fingerprint") == fingerprint:
+        pushed, message, skipped = True, "内容与已推送版本一致，已跳过重复推送", True
+    else:
+        pushed, message = push_to_group(content)
+        skipped = False
+
     if record_status:
-        save_push_status(day, {
-            "date": day.isoformat(),
-            "pushed": pushed,
-            "message": message,
-            "pushed_at": datetime.now().isoformat(timespec="seconds") if pushed else None,
-        })
-    return {"date": day.isoformat(), "path": str(path), "pushed": pushed, "message": message, "content": content}
+        status = dict(prev)
+        status.update(
+            {
+                "date": day.isoformat(),
+                "pushed": pushed,
+                "message": message,
+                "fingerprint": fingerprint,
+            }
+        )
+        if pushed and not skipped:
+            status["pushed_at"] = datetime.now().isoformat(timespec="seconds")
+            status["attempts"] = int(prev.get("attempts") or 0) + 1
+            status["last_error"] = ""
+        elif not pushed:
+            status["attempts"] = int(prev.get("attempts") or 0) + 1
+            status["last_error"] = message
+            # 从没成功过就是 None；成功过但这次失败，保留上次成功时间（它确实推出去过）
+            status["pushed_at"] = prev.get("pushed_at")
+        if final:
+            status["final"] = True
+            status["final_at"] = datetime.now().isoformat(timespec="seconds")
+        save_push_status(day, status)
+
+    return {
+        "date": day.isoformat(),
+        "path": str(path),
+        "pushed": pushed,
+        "message": message,
+        "skipped": skipped,
+        "final": final,
+        "content": content,
+    }
 
 
 def yesterday() -> date:

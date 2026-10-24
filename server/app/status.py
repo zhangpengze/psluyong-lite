@@ -146,25 +146,39 @@ def _backup_row() -> dict:
     }
 
 
+def _due_day(now: datetime | None = None) -> date:
+    """当下"该已经推送成功"的那一天。
+
+    旧实现只看昨天：18:00 没推成功，要等到第二天才变黄点，整整 24 小时没人知道。
+    现在按配置的推送时点算——过了今天的推送时点就查今天，否则查昨天。
+    """
+    from .config import Config
+
+    now = now or datetime.now()
+    due_today = (now.hour, now.minute) >= (Config.DAILY_REPORT_HOUR, Config.DAILY_REPORT_MINUTE)
+    return now.date() if due_today else now.date() - timedelta(days=1)
+
+
 def _report_row() -> dict:
     from .config import DATA_DIR, Config
 
     if not Config.NAPCAT_WEBHOOK:
         return {"status": STATUS_OFF, "detail": "推送通道未配置，日报只生成不推送"}
-    yesterday = date.today() - timedelta(days=1)
-    status_file = DATA_DIR / "reports" / f"{yesterday:%Y-%m-%d}.status.json"
+    day = _due_day()
+    status_file = DATA_DIR / "reports" / f"{day:%Y-%m-%d}.status.json"
     if not status_file.exists():
-        return {"status": STATUS_WARN, "detail": f"{yesterday} 日报没有推送记录"}
+        return {"status": STATUS_WARN, "detail": f"{day} 日报没有推送记录"}
     try:
         payload = json.loads(status_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"status": STATUS_WARN, "detail": f"{yesterday} 日报推送状态读不到"}
+        return {"status": STATUS_WARN, "detail": f"{day} 日报推送状态读不到"}
     if payload.get("pushed"):
-        return {"status": STATUS_OK, "detail": f"{yesterday} 日报已推送"}
+        suffix = "（已出终版）" if payload.get("final") else ""
+        return {"status": STATUS_OK, "detail": f"{day} 日报已推送{suffix}"}
     message = (payload.get("message") or "").strip()[:80]
     return {
         "status": STATUS_BAD,
-        "detail": f"{yesterday} 日报推送失败" + (f" · {message}" if message else ""),
+        "detail": f"{day} 日报推送失败" + (f" · {message}" if message else ""),
     }
 
 

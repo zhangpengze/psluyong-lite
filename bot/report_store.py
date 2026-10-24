@@ -29,6 +29,24 @@ def save_report(app, content: str, day: date) -> Path:
     return path
 
 
+def status_path(day: date) -> Path:
+    from server.app.config import DATA_DIR
+
+    return DATA_DIR / "reports" / f"{day:%Y-%m-%d}.status.json"
+
+
+def load_push_status(day: date) -> dict:
+    """读某天的推送状态；没有/读坏一律返回空 dict（语义是"没推过"）。
+
+    幂等闸门靠它：内容指纹与已推送版本一致就不再发第二条。
+    """
+    try:
+        payload = json.loads(status_path(day).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def save_push_status(day: date, status: dict) -> Path:
     """推送状态落盘到 reports/<日期>.status.json。
 
@@ -39,11 +57,13 @@ def save_push_status(day: date, status: dict) -> Path:
 
     status_dir = DATA_DIR / "reports"
     status_dir.mkdir(parents=True, exist_ok=True)
-    path = status_dir / f"{day:%Y-%m-%d}.status.json"
+    path = status_path(day)
     payload = dict(status)
     payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
-    logger.info("推送状态已记录 %s: pushed=%s", path.name, payload.get("pushed"))
+    logger.info(
+        "推送状态已记录 %s: pushed=%s final=%s", path.name, payload.get("pushed"), payload.get("final")
+    )
     return path

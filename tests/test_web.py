@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from datetime import date, timedelta
 
-from tests.conftest import API_KEY
+from tests.conftest import API_KEY, post_login
 
 AUTH = {"X-API-Key": API_KEY}
 
@@ -68,7 +68,7 @@ def test_viewer_sees_no_delete_button(app, clean_db):
             db.session.commit()
 
     c = app.test_client()
-    assert c.post("/login", data={"username": "viewer_page", "password": "viewer-pass-1"}).status_code == 302
+    assert post_login(c, "viewer_page", "viewer-pass-1").status_code == 302
     html = c.get("/records").get_data(as_text=True)
     assert "data-delete=" not in html
     assert "作者0" in html
@@ -124,10 +124,15 @@ def test_login_rate_limited(app):
     ratelimit.reset(f"login:{ip['REMOTE_ADDR']}")
 
     c = app.test_client()
-    for _ in range(5):
-        assert c.post("/login", data={"username": "admin", "password": "wrong"}, environ_base=ip).status_code == 401
 
-    resp = c.post("/login", data={"username": "admin", "password": "wrong"}, environ_base=ip)
+    def attempt():
+        # 带 CSRF token 提交：本用例断言的是凭据/限流结果（401/429），不是 CSRF
+        return post_login(c, "admin", "wrong", environ_base=ip)
+
+    for _ in range(5):
+        assert attempt().status_code == 401
+
+    resp = attempt()
     assert resp.status_code == 429
     assert "Retry-After" in resp.headers
     assert "尝试次数过多" in resp.get_data(as_text=True)

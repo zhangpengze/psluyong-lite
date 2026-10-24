@@ -57,7 +57,11 @@ try {
     {% if me %}
       <div class="who">{{ me.username }}{% if me.is_admin %} · 管理员{% else %} · 只读{% endif %}</div>
       <div class="who-login">上次登录 {{ me.last_login_at|localtime('%m-%d %H:%M') }}</div>
-      <a href="{{ url_for('web.logout') }}">退出登录</a>
+      {# 登出必须走 POST 表单：GET 链接可被跨站 <img> 强制触发，把人踢下线 #}
+      <form method="post" action="{{ url_for('web.logout') }}" class="logout-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button type="submit">退出登录</button>
+      </form>
     {% endif %}
   </aside>
 

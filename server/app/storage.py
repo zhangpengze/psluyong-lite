@@ -49,6 +49,10 @@ def resolve_image_path(stored: str | None, root: Path | None = None) -> Path | N
 
     root 只给测试与巡检脚本用（让它们能指向临时目录），生产调用一律走默认值，
     这样"应用看到的图片"和"巡检看到的图片"是同一套解析规则。
+
+    纵深防御：解析结果必须落在 base（默认 IMAGES_DIR）之内——库里存的路径
+    理论上可被篡改（改库/注入），否则 /image 接口会把任意本地文件当图片发出去，
+    delete_image 也会照单删。越界返回 None，调用方按「文件不存在」处理。
     """
     if not stored:
         return None
@@ -58,12 +62,20 @@ def resolve_image_path(stored: str | None, root: Path | None = None) -> Path | N
 
     if "images/" in s:
         tail = s.split("images/", 1)[1]
-        return base.joinpath(*[p for p in tail.split("/") if p])
+        candidate = base.joinpath(*[p for p in tail.split("/") if p])
+    else:
+        is_rooted = s.startswith("/") or (len(s) > 1 and s[1] == ":")
+        candidate = Path(s) if is_rooted else base / s
 
-    is_rooted = s.startswith("/") or (len(s) > 1 and s[1] == ":")
-    if is_rooted:
-        return Path(s)
-    return base / s
+    # resolve 后校验仍在 base 内：挡住 `images/../..` 穿越与指向
+    # C:\Windows\win.ini 这类库内绝对路径。返回未 resolve 的原路径，
+    # 保证既有合法路径的解析结果与改动前逐字节一致。
+    try:
+        candidate.resolve().relative_to(base.resolve())
+    except (OSError, ValueError):
+        logger.warning("图片路径越界，拒绝解析: stored=%s", stored)
+        return None
+    return candidate
 
 
 def save_image(file_storage, work_date: date) -> tuple[str, str, str]:

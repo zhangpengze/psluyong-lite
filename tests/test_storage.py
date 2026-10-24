@@ -38,6 +38,31 @@ def test_none_and_empty():
     assert storage.resolve_image_path("") is None
 
 
+def test_tampered_absolute_path_rejected(tmp_path, monkeypatch):
+    """库被篡改指向 images 目录之外的系统文件：必须拒绝。
+
+    返回 None 后调用方按既有契约处理：/image 路由 404，delete_image 跳过删除——
+    否则改库就能让接口吐出任意本地文件，或让删除功能删到目录外。
+    """
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    assert storage.resolve_image_path(r"C:\Windows\win.ini") is None
+    assert storage.resolve_image_path("/etc/passwd") is None
+
+
+def test_traversal_out_of_images_dir_rejected(tmp_path, monkeypatch):
+    """images/ 段之后跟 .. 穿越，不允许逃出 IMAGES_DIR"""
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    assert storage.resolve_image_path("images/../../../evil.jpg") is None
+    assert storage.resolve_image_path("2026/../../evil.jpg") is None
+
+
+def test_absolute_path_inside_images_dir_allowed(tmp_path, monkeypatch):
+    """同机合法绝对路径（自定义 IMAGES_DIR 名、路径里没有 images 段）不能被误杀"""
+    monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)
+    stored = str(tmp_path / "2026" / "10" / "abc.jpg")
+    assert storage.resolve_image_path(stored) == Path(stored)
+
+
 def test_save_image_stores_relative_path(tmp_path, monkeypatch):
     """新写入的数据必须是相对路径，否则换机又会坏"""
     monkeypatch.setattr(storage, "IMAGES_DIR", tmp_path)

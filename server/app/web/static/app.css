@@ -625,6 +625,20 @@ tr.partner-row.flash-row td { animation: row-flash 1.8s ease-out; }
 /* 侧栏：上次登录时间（admin_users.last_login_at，一眼看出账号被谁用过） */
 .who-login { font-size: 12px; color: var(--sidebar-muted); padding: 1px 12px 6px; }
 
+/* 退出登录：原是 <a>，改成 POST 表单后按钮要长得和侧栏链接一模一样 */
+.sidebar .logout-form { display: block; }
+.sidebar .logout-form button {
+  width: 100%;
+  display: flex; align-items: center; gap: 9px;
+  color: var(--sidebar-text);
+  padding: 9px 12px;
+  border: 0; border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit; font-size: 13.5px;
+  text-align: left; cursor: pointer;
+}
+.sidebar .logout-form button:hover { background: var(--sidebar-hover); }
+
 /* ===== 移动端 ===== */
 @media (max-width: 900px) {
   .reports-layout { grid-template-columns: 1fr; }
@@ -646,6 +660,7 @@ tr.partner-row.flash-row td { animation: row-flash 1.8s ease-out; }
   .theme-btn .theme-label { display: none; }
   .sidebar a { padding: 8px 10px; white-space: nowrap; }
   .sidebar a svg { display: none; }
+  .sidebar .logout-form button { padding: 8px 10px; white-space: nowrap; }
   .main { padding: 16px 14px 36px; }
   .bar-row { grid-template-columns: 70px 1fr 34px; }
   .table-wrap { max-height: none; }  /* 手机上别做双重滚动 */

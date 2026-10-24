@@ -6,9 +6,10 @@
 
 这里做最小可行迁移（不引入 alembic）：
     1. 对每张已存在的表，对比模型列与 PRAGMA table_info，缺的列用
-       ALTER TABLE ADD COLUMN 补上（新增列按可空处理，不写死默认值，
-       避免老行回填的历史包袱）
-    2. 补建缺失的索引（包括部分唯一索引）
+       ALTER TABLE ADD COLUMN 补上（新增列按可空处理——SQLite 的
+       ADD COLUMN 不允许同时声明非空默认值），随后若模型定义了
+       default，就再跟一条 UPDATE 把存量行回填成默认值而不是留 NULL；
+    2. 补建缺失的索引（包括部分唯一索引）；
 改列类型/删列/重命名这类破坏性操作仍然走 python -m server.backup 恢复流程，
 这里刻意不碰——自动迁移做破坏性变更是事故源头。
 """
@@ -43,6 +44,23 @@ _DEPRECATED_INDEXES: dict[str, tuple[str, ...]] = {
 }
 
 
+# 「模型没给可用默认值」的标记：template_name 这类无 default 的列，
+# 补列后宁可留 NULL 也不能凭空编一个值出来。
+_NO_DEFAULT = object()
+
+
+def _scalar_default(col) -> object:
+    """模型为列定义的标量默认值（callable 会当场求值），没有则返回 _NO_DEFAULT"""
+    default = col.default
+    if default is None:
+        return _NO_DEFAULT
+    if default.is_scalar:
+        return default.arg
+    if default.is_callable:
+        return default.arg()
+    return _NO_DEFAULT
+
+
 def run_migrations() -> list[str]:
     """补列 + 补索引 + 删废弃索引，返回执行过的变更清单（供测试与日志）"""
     db.create_all()  # 先建缺失的表，已有表保持原样
@@ -61,11 +79,25 @@ def run_migrations() -> list[str]:
                 if col.name in existing_cols:
                     continue
                 col_type = col.type.compile(engine.dialect)
-                # SQLite 的 ADD COLUMN 不支持在加列的同时回填非空默认值，
-                # 所以新列一律按可空加——历史行为由模型层 default 保证
+                # SQLite 的 ADD COLUMN 不允许同时声明非空默认值，所以新列一律按可空加；
+                # 存量行随后由下面的 UPDATE 回填成模型默认值，不能留 NULL——
+                # 布尔字段为 NULL 时，之后所有 .is_(False) 过滤都会静默漏掉这批老数据。
                 conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}'))
                 applied.append(f"{table.name}.{col.name}")
                 logger.warning("老库补列 %s.%s（代码比库新，属正常升级）", table.name, col.name)
+
+                default_value = _scalar_default(col)
+                if default_value is not _NO_DEFAULT:
+                    # 走 Core UPDATE：列类型的 bind processor 会把 date/datetime
+                    # 序列化成 SQLite 认识的字符串，直接 text()+参数会绑不上。
+                    # 只在「本次补的新列」上执行——已存在的列（is_deleted 等）一律不动。
+                    conn.execute(
+                        table.update()
+                        .where(table.c[col.name].is_(None))
+                        .values({col.name: default_value})
+                    )
+                    applied.append(f"{table.name}.{col.name}:backfill")
+                    logger.warning("老库补列回填 %s.%s（存量行按模型默认值填，不留 NULL）", table.name, col.name)
 
         existing_indexes = {i["name"] for i in inspector.get_indexes(table.name)}
 

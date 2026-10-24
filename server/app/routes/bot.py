@@ -11,6 +11,7 @@ Authorization: Bearer），没配则放行——内网部署场景，默认信�
 
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 
@@ -31,7 +32,10 @@ def _secret_ok() -> bool:
         auth = (request.headers.get("Authorization") or "").strip()
         if auth.lower().startswith("bearer "):
             provided = auth[7:].strip()
-    return provided == secret
+    # 常量时间比较（同 auth.check_api_key），避免按响应时间逐字节猜密钥。
+    # 转 utf-8 bytes 再比：compare_digest 对含非 ASCII 的 str 会抛 TypeError，
+    # 攻击者发个中文头就能把 403 变成 500。secret 为空仍直接放行（内网信任边界，见模块注释）。
+    return hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8"))
 
 
 def _handle_async(app, payload: dict) -> None:

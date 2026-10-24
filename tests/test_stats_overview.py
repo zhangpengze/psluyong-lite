@@ -16,7 +16,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from tests.conftest import API_KEY
+from tests.conftest import API_KEY, post_login
 
 AUTH = {"X-API-Key": API_KEY}
 
@@ -369,7 +369,7 @@ def test_viewer_session_can_read_overview(app, clean_db):
             db.session.commit()
 
     c = app.test_client()
-    assert c.post("/login", data={"username": "viewer_overview", "password": "viewer-pass-1"}).status_code == 302
+    assert post_login(c, "viewer_overview", "viewer-pass-1").status_code == 302
     assert c.get("/api/v1/stats/overview").status_code == 200
 
 

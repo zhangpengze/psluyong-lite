@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from io import BytesIO
 
-from tests.conftest import API_KEY
+from tests.conftest import API_KEY, post_login
 
 AUTH = {"X-API-Key": API_KEY}
 
@@ -40,7 +40,7 @@ def test_login_required_redirects(client):
 
 
 def test_wrong_password_rejected(client):
-    resp = client.post("/login", data={"username": "admin", "password": "wrong"})
+    resp = post_login(client, "admin", "wrong")
     assert resp.status_code == 401
 
 
@@ -180,7 +180,7 @@ def test_viewer_cannot_write(app, clean_db, sample_image, admin_client, admin_cs
         db.session.commit()
 
     c = app.test_client()
-    assert c.post("/login", data={"username": "viewer1", "password": "viewer-pass"}).status_code == 302
+    assert post_login(c, "viewer1", "viewer-pass").status_code == 302
 
     assert c.delete(f"/api/v1/records/{record_id}").status_code == 403
     assert c.post("/api/v1/reports/run", json={}).status_code == 403
@@ -247,8 +247,11 @@ def test_restore_rejects_duplicate(admin_client, admin_csrf, clean_db, sample_im
     assert "无法恢复" in resp.get_json()["error"]
 
 
-def test_report_run_requires_csrf(admin_client, admin_csrf):
-    """手动跑日报同样受 CSRF 保护"""
+def test_report_run_requires_csrf(admin_client, admin_csrf, monkeypatch, tmp_path):
+    """手动跑日报同样受 CSRF 保护（落盘目录隔离到 tmp，不污染共享 reports/）"""
+    import server.app.config as config_mod
+
+    monkeypatch.setattr(config_mod, "DATA_DIR", tmp_path)
     assert admin_client.post("/api/v1/reports/run", json={}).status_code == 403
     resp = admin_client.post("/api/v1/reports/run", headers=admin_csrf, json={"push": False})
     assert resp.status_code == 200, resp.get_data(as_text=True)

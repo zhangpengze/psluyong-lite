@@ -190,16 +190,22 @@ def test_handle_event_yesterday(app, monkeypatch):
     assert calls["period"] == [(date.today() - timedelta(days=1), date.today() - timedelta(days=1))]
 
 
-def test_handle_event_does_not_touch_archive(app, monkeypatch):
-    """群内触发是纯查询：reports/ 目录不被创建、不写任何文件"""
-    from server.app.config import DATA_DIR
+def test_handle_event_does_not_touch_archive(app, monkeypatch, tmp_path):
+    """群内触发是纯查询：reports/ 目录不被创建、不写任何文件。
 
+    落盘目录指到本用例自己的 tmp：共享 DATA_DIR/reports 里可能已经有别的
+    用例（test_report / test_smoke 的 run_daily）写下的 .md，断言共享目录
+    会随执行顺序变化——单跑绿、子集/随机顺序红就是这么来的。
+    """
+    import server.app.config as config_mod
+
+    monkeypatch.setattr(config_mod, "DATA_DIR", tmp_path)
     _patch_pipeline(monkeypatch)
     _no_audit(monkeypatch)
 
     handler.handle_event(app, _event("汇总"))
 
-    reports_dir = DATA_DIR / "reports"
+    reports_dir = tmp_path / "reports"
     assert not reports_dir.exists() or not list(reports_dir.glob("*.md"))
 
 
@@ -381,6 +387,23 @@ def test_onebot_callback_rejects_bad_secret(client, monkeypatch):
     bearer = client.post("/api/v1/bot/onebot", json=_event("汇总"),
                          headers={"Authorization": "Bearer s3cret"})
     assert bearer.status_code == 200
+
+
+def test_onebot_callback_rejects_non_ascii_secret(client, monkeypatch):
+    """密钥比较必须走 bytes：hmac.compare_digest 对含非 ASCII 的 str 会抛
+    TypeError，攻击者发个非 ASCII 头就能把 403 变成 500。"""
+    monkeypatch.setattr(Config, "BOT_CALLBACK_SECRET", "s3cret")
+    resp = client.post("/api/v1/bot/onebot", json=_event("汇总"),
+                       headers={"X-Bot-Secret": "sécret"})
+    assert resp.status_code == 403
+
+
+def test_onebot_callback_empty_secret_still_allowed(client, monkeypatch):
+    """不配 secret 仍直接放行：内网部署默认信任网络边界，是文档声明过的取舍，本轮保留"""
+    monkeypatch.setattr(Config, "BOT_CALLBACK_SECRET", "")
+    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: None)
+    resp = client.post("/api/v1/bot/onebot", json=_event("汇总"))
+    assert resp.status_code == 200
 
 
 def test_onebot_callback_swallows_empty_body(client, monkeypatch):

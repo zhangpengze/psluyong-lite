@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from sqlalchemy import inspect, text
 
 from server.app.db import db
@@ -42,6 +44,48 @@ def test_migration_is_idempotent(app):
     with app.app_context():
         assert run_migrations() == []
         assert run_migrations() == []
+
+
+def test_migration_backfills_default_for_new_column(app, clean_db):
+    """老库补列后，存量行必须回填成模型默认值而不是 NULL。
+
+    留 NULL 的代价：未来新增布尔字段时，老数据会从 `.is_(False)` 过滤里
+    静默消失——列表里看不到、统计里也没有，还没有任何报错。
+    """
+    from server.app.models import Record
+
+    with app.app_context():
+        # 存量行先落库，再模拟"老库缺列"
+        db.session.add(Record(work_date=date(2026, 10, 21), employee_name="张三", template_name="模板A"))
+        db.session.commit()
+
+        db.session.execute(text("ALTER TABLE records DROP COLUMN processing_ms"))
+        db.session.commit()
+
+        applied = run_migrations()
+
+        assert "records.processing_ms" in applied
+        assert "records.processing_ms:backfill" in applied
+        values = [row[0] for row in db.session.execute(text("SELECT processing_ms FROM records"))]
+        assert values, "应有存量行"
+        assert all(v is not None for v in values), "补列后存量行不能留 NULL"
+        assert all(v == 0 for v in values), "应回填模型默认值 0"
+
+
+def test_migration_does_not_touch_existing_columns(app, clean_db):
+    """已有列（is_deleted 等）的行为一律不动：结构最新时迁移零变更、零回填"""
+    from server.app.models import Record
+
+    with app.app_context():
+        assert run_migrations() == []
+        # 存量行的 is_deleted 保持原值，不会被"顺手回填"覆盖
+        db.session.add(
+            Record(work_date=date(2026, 10, 21), employee_name="张三", template_name="模板A", is_deleted=True)
+        )
+        db.session.commit()
+        assert run_migrations() == []
+        rows = db.session.execute(text("SELECT is_deleted FROM records")).fetchall()
+        assert rows and rows[0][0] == 1
 
 
 def test_migration_drops_deprecated_dedup_index(app):

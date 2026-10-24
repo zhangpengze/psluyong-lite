@@ -10,7 +10,20 @@ import pytest
 import requests
 
 from bot import report as report_mod
-from server.app.config import DATA_DIR, Config
+from server.app.config import Config
+
+
+@pytest.fixture()
+def isolated_data_dir(monkeypatch, tmp_path):
+    """把落盘根目录指到本用例的 tmp。
+
+    run_daily 会往共享 DATA_DIR/reports 写 .md/.status.json，污染
+    test_bot_handler 对「纯查询不落盘」的断言——子集/随机顺序下会红。
+    """
+    import server.app.config as config_mod
+
+    monkeypatch.setattr(config_mod, "DATA_DIR", tmp_path)
+    return tmp_path
 
 
 class _Resp:
@@ -121,7 +134,7 @@ def test_save_push_status_roundtrip():
     assert json.loads(path.read_text(encoding="utf-8"))["pushed"] is False
 
 
-def test_run_daily_persists_status(app, monkeypatch):
+def test_run_daily_persists_status(app, monkeypatch, isolated_data_dir):
     """run_daily 全流程：生成 + 存档 + 推送状态落盘"""
     monkeypatch.setattr(report_mod, "push_to_group", lambda content: (True, "推送成功"))
     day = date(2026, 10, 21)
@@ -132,13 +145,13 @@ def test_run_daily_persists_status(app, monkeypatch):
     assert result["date"] == "2026-10-21"
     assert Path(result["path"]).exists()  # 日报 Markdown 已存档
 
-    status_file = DATA_DIR / "reports" / "2026-10-21.status.json"
+    status_file = isolated_data_dir / "reports" / "2026-10-21.status.json"
     data = json.loads(status_file.read_text(encoding="utf-8"))
     assert data["pushed"] is True
     assert data["pushed_at"] is not None
 
 
-def test_run_daily_records_failure_status(app, monkeypatch):
+def test_run_daily_records_failure_status(app, monkeypatch, isolated_data_dir):
     """推送失败：状态落盘记下失败原因，日报本身不丢"""
     monkeypatch.setattr(report_mod, "push_to_group", lambda content: (False, "推送异常: 超时"))
     day = date(2026, 10, 20)
@@ -146,7 +159,7 @@ def test_run_daily_records_failure_status(app, monkeypatch):
     result = report_mod.run_daily(app, day, push=True)
 
     assert result["pushed"] is False
-    data = json.loads((DATA_DIR / "reports" / "2026-10-20.status.json").read_text(encoding="utf-8"))
+    data = json.loads((isolated_data_dir / "reports" / "2026-10-20.status.json").read_text(encoding="utf-8"))
     assert data["pushed"] is False
     assert "超时" in data["message"]
     assert data["pushed_at"] is None

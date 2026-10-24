@@ -41,11 +41,25 @@ def client(app):
     return app.test_client()
 
 
+def post_login(client, username="admin", password="admin-pass-123", environ_base=None):
+    """带 CSRF 的 /login POST。
+
+    登录表单挂了 CSRF 校验：先 GET /login 让会话拿到 token，
+    再从会话里取出来放进 _csrf 字段提交——与浏览器真实登录路径一致。
+    """
+    kwargs = {"environ_base": environ_base} if environ_base else {}
+    client.get("/login", **kwargs)
+    with client.session_transaction() as sess:
+        token = sess.get("csrf_token", "")
+    data = {"username": username, "password": password, "_csrf": token}
+    return client.post("/login", data=data, **kwargs)
+
+
 @pytest.fixture()
 def admin_client(app):
     """已登录的后台会话"""
     c = app.test_client()
-    resp = c.post("/login", data={"username": "admin", "password": "admin-pass-123"})
+    resp = post_login(c)
     assert resp.status_code == 302, "管理员登录失败"
     return c
 

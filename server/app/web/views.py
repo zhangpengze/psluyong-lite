@@ -21,7 +21,13 @@ from flask import (
 )
 
 from ..audit import ACTION_LABELS, log_action
-from ..auth import current_user, generate_csrf_token, login_required
+from ..auth import (
+    current_user,
+    csrf_protect,
+    generate_csrf_token,
+    login_required,
+    validate_csrf_token,
+)
 from ..config import Config
 from ..overview import RangeError, get_overview, parse_limit, parse_range
 from ..panels import overview_html
@@ -67,6 +73,14 @@ def login():
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
 
+        # 登录同样是写操作（写 session），也要过 CSRF：
+        # 与后台写接口同一套实现——session 里的 csrf_token，表单 _csrf 或 X-CSRF-Token。
+        # 放在限流计数之前：没过安全校验的请求不该消耗正常用户的登录额度。
+        if not validate_csrf_token():
+            logger.warning("登录 CSRF 校验失败 ip=%s", request.remote_addr)
+            flash("安全校验失败，请刷新页面后重试", "error")
+            return render_template("login.html", username=username, locked_message=None), 403
+
         allowed, retry_after = rate_hit(limit_key, LOGIN_MAX_FAILS, LOGIN_WINDOW_S)
         if not allowed:
             logger.warning("登录尝试过于频繁 ip=%s username=%s", request.remote_addr, username)
@@ -105,7 +119,10 @@ def login():
     return render_template("login.html", username="", locked_message=None)
 
 
-@bp.get("/logout")
+# 登出是写操作（清 session）：GET 会被 <img src="/logout"> 这类跨站标签强制触发，
+# 所以只收 POST 并挂 csrf_protect，与其它会话写接口同一套防护。
+@bp.post("/logout")
+@csrf_protect
 def logout():
     session.clear()
     return redirect(url_for("web.login"))

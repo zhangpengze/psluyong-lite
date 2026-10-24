@@ -327,24 +327,40 @@ docker compose up -d
 ### 5. 群内指令（可选）：群里发指令自动回日报
 
 不想等每天定时推送，可以在群里发指令，机器人**私聊**回复触发者
-（不推群、不刷屏；私聊失败才 fallback 发回群里）。
+（不推群、不刷屏；私聊失败才 fallback 发回**触发所在的那个群**）。
+
+> **2026-10-24 起默认 fail-closed**：没配 `BOT_CALLBACK_SECRET` 时回调一律 403，
+> 没配 `BOT_ADMIN_QQ_IDS` 时谁都不能触发。老部署升级后指令会"突然不理人"，
+> 按下面第 2 步补两个键再重启即可。这个端点匿名可达等于把含员工姓名/稿件
+> 标题/失败原因的报表对任何能碰到 NAS 端口的人开放。
 
 1. NapCat WebUI →「网络配置」→ 新建/启用 **HTTP 上报**（反向 post）：
    - 上报地址 `http://<NAS局域网IP>:8080/api/v1/bot/onebot`
-   - 勾选**群消息**上报，心跳/通知类不用开
-   - 请求头加 `X-Bot-Secret: <你的密钥>`（配了 `BOT_CALLBACK_SECRET` 才需要）
+   - 勾选**群消息**上报，心跳/通知类不用开（开了也会被前置过滤，但白占带宽）
+   - 请求头加 `X-Bot-Secret: <你的密钥>`（与 `BOT_CALLBACK_SECRET` 同一个值）
 2. `.env` 补上：
 
 ```bash
-# 允许触发指令的 QQ 号，逗号分隔；留空 = 群里任何人都能触发
+# 允许触发指令的 QQ 号，逗号分隔。**留空 = 谁都不能用**（不是"不限制"）
 BOT_ADMIN_QQ_IDS=10001,10002
-# 回调校验密钥，与 NapCat 上报请求头 X-Bot-Secret 保持一致；留空 = 不校验
+# 允许触发指令的群号，逗号分隔。留空 = 只允许 REPORT_GROUP_ID 那个群
+BOT_ALLOWED_GROUP_IDS=
+# 回调校验密钥，与 NapCat 上报请求头 X-Bot-Secret 保持一致。留空 = 拒绝所有回调
 BOT_CALLBACK_SECRET=
+# 逃生阀：仅完全隔离的内网/本机调试才设 1（允许无密钥回调，会打 warning）
+BOT_ALLOW_INSECURE=0
 # 同一人触发冷却秒数，防连点
 BOT_COOLDOWN_S=10
 ```
 
 3. 重启 `docker compose up -d`，在群里发指令即可。
+
+**排障：指令没反应**，按顺序查：
+1. `docker logs psluyong-lite | grep 机器人回调` —— 出现「被拒绝（密钥缺失或不匹配）」
+   就是 secret 没对上（NapCat 请求头 vs `.env`）；
+2. 出现「非授权群的触发已忽略」——群号没进 `BOT_ALLOWED_GROUP_IDS`，且不等于 `REPORT_GROUP_ID`；
+3. 出现「白名单外的触发已忽略」——QQ 号没进 `BOT_ADMIN_QQ_IDS`；
+4. 完全没有日志——NapCat 的上报地址/勾选项没配对。
 
 指令集（精确匹配，多说一个字都不触发，避免正常聊天被误触发）：
 

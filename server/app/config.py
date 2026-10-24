@@ -64,10 +64,19 @@ class Config:
     REPORT_GROUP_ID = os.getenv("REPORT_GROUP_ID", "").strip()
 
     # QQ 机器人反向指令（群里发「汇总」→ 私聊回复当天日报）
-    # 白名单：允许触发指令的 QQ 号，逗号分隔；空 = 不限制
+    # 白名单：允许触发指令的 QQ 号，逗号分隔。**留空 = 谁都不能用**（fail-closed）。
+    # 2026-10-24 改：原来是"留空=不限制"，与"内网信任边界"叠加后等于——机器人被
+    # 拉进任何群，群里任何人发一句「汇总」就能把含员工姓名/作者/标题/失败原因的
+    # 报表私聊带走。要放宽就显式列出 QQ 号，别靠"留空"表达。
     BOT_ADMIN_QQ_IDS = os.getenv("BOT_ADMIN_QQ_IDS", "").strip()
-    # 回调校验密钥：NapCat 上报头里带同一个值才处理；空 = 不校验（内网信任边界）
+    # 允许触发指令的群号，逗号分隔。留空 = 只允许 REPORT_GROUP_ID 这一个群。
+    # 单独一个键的原因：机器人常同时待在日报群和一个管理群里。
+    BOT_ALLOWED_GROUP_IDS = os.getenv("BOT_ALLOWED_GROUP_IDS", "").strip()
+    # 回调校验密钥：NapCat 上报请求头 X-Bot-Secret 带同一个值才处理。
+    # **留空 = 拒绝所有回调**（fail-closed），旧行为是留空即放行。
     BOT_CALLBACK_SECRET = os.getenv("BOT_CALLBACK_SECRET", "").strip()
+    # 逃生阀：确实在完全隔离的内网/本机调试时，显式置 1 才允许"无密钥回调"。
+    BOT_ALLOW_INSECURE = os.getenv("BOT_ALLOW_INSECURE", "0") == "1"
     # 同一人触发指令的冷却秒数，防连点/重复上报
     BOT_COOLDOWN_S = int(os.getenv("BOT_COOLDOWN_S", "10"))
 

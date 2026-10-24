@@ -9,18 +9,19 @@
     「汇总」两个字在正常聊天里太容易出现，误触发会往群里/私聊里乱刷日报。
   - 群内触发只私聊回复触发者，不再推群（定时任务已经推过群了），
     且 run_daily 用 record_status=False，不覆盖定时推送的徽标状态。
-  - 私聊失败（被拒收/不是好友）时 fallback 发回群里，至少触发者看得到。
+  - 私聊失败（被拒收/不是好友）时 fallback 发回**触发者所在的群**，
+    绝不借 REPORT_GROUP_ID 把报表贴到另一个群去。
   - 每次成功触发写一条审计（actor=qq:号），后台「操作日志」可追溯。
+  - 谁能用（QQ 白名单 / 群白名单 / 冷却）在 bot/access.py，默认 fail-closed。
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import threading
-import time
 from datetime import date, timedelta
 
+from . import access
 from .report import build_period_report, push_to_group, push_to_user
 
 logger = logging.getLogger(__name__)
@@ -43,10 +44,6 @@ HELP_TEXT = """【录用机器人指令】
 汇总 MM-DD / 汇总 YYYY-MM-DD — 指定日期
 汇总 本周 / 本月 / 上周 — 区间汇总
 帮助 — 显示本列表"""
-
-# 触发冷却：同一 user_id 在窗口内重复触发直接忽略（防连点/重复上报）
-_cooldown: dict[int, float] = {}
-_cooldown_lock = threading.Lock()
 
 
 def extract_text(payload: dict) -> str:
@@ -145,29 +142,23 @@ def parse_command(text: str, today: date | None = None) -> tuple[str, dict] | No
 
 
 def _allowed(user_id: int, whitelist: set[int]) -> bool:
-    """白名单为空 = 不限制（内网小群场景）；非空则只放行名单内 QQ 号。"""
-    return not whitelist or user_id in whitelist
+    """兼容入口：实现与语义见 bot/access.py（留空 = 谁都不能用）"""
+    return access.allowed_user(user_id, whitelist)
+
+
+def _allowed_group(group_id, raw_allowed: str, report_group_id: str) -> bool:
+    """兼容入口：实现与语义见 bot/access.py"""
+    return access.allowed_group(group_id, raw_allowed, report_group_id)
 
 
 def _cooldown_ok(user_id: int, window_s: int) -> bool:
-    now = time.monotonic()
-    with _cooldown_lock:
-        last = _cooldown.get(user_id)
-        if last is not None and now - last < window_s:
-            return False
-        _cooldown[user_id] = now
-        if len(_cooldown) > 64:  # 攒够了再打扫，不用每次加锁都扫全表
-            stale_before = now - window_s * 10
-            for uid, ts in list(_cooldown.items()):
-                if ts < stale_before:
-                    del _cooldown[uid]
-        return True
+    """兼容入口：冷却状态在 bot/access.py 里（跨 handler 调用共享同一份）"""
+    return access.cooldown_ok(user_id, window_s)
 
 
 def reset_cooldown() -> None:
     """测试用：清空冷却记录。"""
-    with _cooldown_lock:
-        _cooldown.clear()
+    access.reset_cooldown()
 
 
 def _audit_command(user_id: int, group_id, text: str) -> None:
@@ -183,14 +174,20 @@ def _audit_command(user_id: int, group_id, text: str) -> None:
 
 
 def _reply(uid: int, group_id, content: str) -> tuple[bool, str]:
-    """私聊回复触发者；失败 fallback 发回群里"""
+    """私聊回复触发者；失败则回**触发者所在的群**。
+
+    旧实现 fallback 走 push_to_group()，用的是 REPORT_GROUP_ID——机器人同时
+    在多个群时，A 群某人触发、私聊失败，整份报表（含员工姓名/稿件标题/失败
+    明细）会被贴到 B 群（日报群）。与"群内触发只私聊"的设计直接矛盾，
+    也把内部数据泄给了一个不相干的群。
+    """
     ok, message = push_to_user(uid, content)
     if ok:
         return True, f"已私聊回复 {uid}"
-    logger.warning("私聊回复失败（%s），fallback 发回群 %s", message, group_id)
-    ok2, message2 = push_to_group(content)
+    logger.warning("私聊回复失败（%s），fallback 发回触发所在的群 %s", message, group_id)
+    ok2, message2 = push_to_group(content, group_id=group_id)
     if ok2:
-        return True, f"私聊失败已转推群: {message2}"
+        return True, f"私聊失败已转推触发群: {message2}"
     return False, f"私聊与推群均失败: {message2}"
 
 
@@ -228,6 +225,10 @@ def handle_event(app, payload: dict, whitelist: set[int] | None = None,
         logger.warning("群消息缺少合法 user_id: %r", user_id)
         return False, "user_id 异常"
 
+    if not _allowed_group(group_id, Config.BOT_ALLOWED_GROUP_IDS, Config.REPORT_GROUP_ID):
+        logger.info("非授权群的触发已忽略: group_id=%s user_id=%s", group_id, uid)
+        return False, "群不在允许列表"
+
     if not _allowed(uid, whitelist):
         logger.info("白名单外的触发已忽略: user_id=%s group_id=%s text=%r", uid, group_id, text)
         return False, "用户不在白名单"
@@ -258,13 +259,5 @@ def handle_event(app, payload: dict, whitelist: set[int] | None = None,
     return replied, message
 
 
-def _parse_whitelist(raw: str) -> set[int]:
-    """'10001, 10002' → {10001, 10002}；脏值直接丢掉。"""
-    out: set[int] = set()
-    for part in (raw or "").replace("，", ",").split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.add(int(part))
-        elif part:
-            logger.warning("BOT_ADMIN_QQ_IDS 含非数字条目，已忽略: %r", part)
-    return out
+# 兼容旧名（群内指令白名单解析与群号解析同一套规则，实现在 access.py）
+_parse_whitelist = access.parse_id_set

@@ -22,13 +22,21 @@ class _Resp:
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
-    """每个用例清冷却 + 不配 webhook（除显式配置的用例外）"""
+    """每个用例清冷却 + 不配 webhook（除显式配置的用例外）
+
+    默认给一套"能用"的授权：群号与 _event 默认值一致（888888），
+    QQ 10001/10002 在白名单里 —— 否则 2026-10-24 收紧成 fail-closed 后，
+    所有 happy-path 用例都会被门禁挡在业务逻辑之前。
+    """
     handler.reset_cooldown()
     monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "")
-    monkeypatch.setattr(Config, "REPORT_GROUP_ID", "123456789")
-    monkeypatch.setattr(Config, "BOT_ADMIN_QQ_IDS", "")
+    monkeypatch.setattr(Config, "REPORT_GROUP_ID", "888888")
+    monkeypatch.setattr(Config, "BOT_ADMIN_QQ_IDS", "10001,10002")
+    monkeypatch.setattr(Config, "BOT_ALLOWED_GROUP_IDS", "")
     monkeypatch.setattr(Config, "BOT_COOLDOWN_S", 10)
     monkeypatch.setattr(Config, "BOT_CALLBACK_SECRET", "")
+    # 路由层默认放行"无密钥回调"，专门的安全用例会显式关掉
+    monkeypatch.setattr(Config, "BOT_ALLOW_INSECURE", True)
 
 
 def _event(text: str | None = None, *, user_id: int = 10001, group_id: int = 888888,
@@ -146,8 +154,8 @@ def _patch_pipeline(monkeypatch):
         calls["user"].append((user_id, content))
         return True, "推送成功"
 
-    def fake_push_to_group(content):
-        calls["group"].append(content)
+    def fake_push_to_group(content, group_id=None):
+        calls["group"].append((content, group_id))
         return True, "推送成功"
 
     monkeypatch.setattr(handler, "build_period_report", fake_build_period_report)
@@ -287,17 +295,24 @@ def test_handle_event_no_audit_when_not_replied(app, monkeypatch):
     assert audits == []
 
 
-def test_handle_event_falls_back_to_group(app, monkeypatch):
-    """私聊失败 → fallback 发回群里"""
+def test_handle_event_falls_back_to_triggering_group(app, monkeypatch):
+    """私聊失败 → fallback 发回**触发所在的群**，不是日报群
+
+    旧实现走 push_to_group(content)，用的是 REPORT_GROUP_ID：机器人同时待在
+    A（办公群）和 B（日报群）时，A 群某人触发、私聊失败，整份报表（含员工
+    姓名/稿件标题/失败明细）会被贴到 B 群——既泄数据又与设计矛盾。
+    """
     calls = _patch_pipeline(monkeypatch)
     _no_audit(monkeypatch)
+    monkeypatch.setattr(Config, "BOT_ALLOWED_GROUP_IDS", "666666")
     monkeypatch.setattr(handler, "push_to_user", lambda uid, content: (False, "被拒收"))
 
-    replied, message = handler.handle_event(app, _event("汇总"))
+    replied, message = handler.handle_event(app, _event("汇总", group_id=666666))
 
     assert replied is True
-    assert "转推群" in message
+    assert "转推触发群" in message
     assert len(calls["group"]) == 1
+    assert calls["group"][0][1] == 666666, "必须发回触发群，绝不能落到 REPORT_GROUP_ID"
 
 
 def test_handle_event_ignores_non_command(app, monkeypatch):
@@ -332,11 +347,43 @@ def test_handle_event_whitelist(app, monkeypatch):
     assert replied is True
 
 
-def test_handle_event_whitelist_empty_allows_all(app, monkeypatch):
+def test_handle_event_whitelist_empty_denies_everyone(app, monkeypatch):
+    """白名单为空 = 谁都不能用（fail-closed）
+
+    旧语义是"空=不限制"：机器人被拉进任何群，群里任何人都能触发，
+    把含员工姓名/作者/标题/失败原因的报表私聊带走。2026-10-24 反转。
+    """
+    _patch_pipeline(monkeypatch)
+    _no_audit(monkeypatch)
+
+    replied, message = handler.handle_event(app, _event("汇总"), whitelist=set())
+
+    assert (replied, message) == (False, "用户不在白名单")
+
+
+def test_handle_event_group_not_allowed(app, monkeypatch):
+    """群号不在允许列表里：即使人和指令都对，也不回"""
     calls = _patch_pipeline(monkeypatch)
     _no_audit(monkeypatch)
-    replied, _ = handler.handle_event(app, _event("汇总"))
+
+    replied, message = handler.handle_event(app, _event("汇总", group_id=666666))
+
+    assert (replied, message) == (False, "群不在允许列表")
+    assert calls["period"] == []
+
+
+def test_handle_event_group_whitelist_allows_extra_group(app, monkeypatch):
+    """BOT_ALLOWED_GROUP_IDS 明确列出的群可以用（机器人常在日报群+管理群）"""
+    calls = _patch_pipeline(monkeypatch)
+    _no_audit(monkeypatch)
+    monkeypatch.setattr(Config, "BOT_ALLOWED_GROUP_IDS", "666666, 777777")
+
+    replied, _ = handler.handle_event(app, _event("汇总", group_id=777777))
     assert replied is True
+    assert len(calls["period"]) == 1
+
+    replied, message = handler.handle_event(app, _event("汇总", group_id=888888))
+    assert (replied, message) == (False, "群不在允许列表"), "列出来之后就只认列出的群"
 
 
 def test_handle_event_cooldown(app, monkeypatch):
@@ -398,12 +445,58 @@ def test_onebot_callback_rejects_non_ascii_secret(client, monkeypatch):
     assert resp.status_code == 403
 
 
-def test_onebot_callback_empty_secret_still_allowed(client, monkeypatch):
-    """不配 secret 仍直接放行：内网部署默认信任网络边界，是文档声明过的取舍，本轮保留"""
+def test_onebot_callback_empty_secret_denied_by_default(client, monkeypatch):
+    """没配 secret 时默认拒绝（fail-closed）
+
+    旧实现留空即放行：任何能碰到 NAS 端口的人 POST 一条「汇总」就能拿到
+    含员工姓名/作者/标题/失败原因的报表。要放行必须显式 BOT_ALLOW_INSECURE=1。
+    """
     monkeypatch.setattr(Config, "BOT_CALLBACK_SECRET", "")
-    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: None)
+    monkeypatch.setattr(Config, "BOT_ALLOW_INSECURE", False)
+    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: pytest.fail("不该被触发"))
+
     resp = client.post("/api/v1/bot/onebot", json=_event("汇总"))
+
+    assert resp.status_code == 403
+
+
+def test_onebot_callback_insecure_opt_in_allowed(client, monkeypatch):
+    """显式开逃生阀（完全隔离内网的调试场景）时才放行无密钥回调"""
+    monkeypatch.setattr(Config, "BOT_CALLBACK_SECRET", "")
+    monkeypatch.setattr(Config, "BOT_ALLOW_INSECURE", True)
+    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: None)
+
+    resp = client.post("/api/v1/bot/onebot", json=_event("汇总"))
+
     assert resp.status_code == 200
+
+
+def test_onebot_callback_filters_before_spawning(client, monkeypatch):
+    """心跳/通知/私聊不进线程：NapCat 上报量里这类占大头"""
+    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: pytest.fail("非群消息不该起线程"))
+
+    heartbeat = client.post("/api/v1/bot/onebot", json={"post_type": "meta_event", "meta_event_type": "heartbeat"})
+    assert heartbeat.status_code == 200
+    assert heartbeat.get_json()["handled"] is False
+
+    private = client.post("/api/v1/bot/onebot", json=_event("汇总", message_type="private"))
+    assert private.status_code == 200
+    assert private.get_json()["handled"] is False
+
+
+def test_onebot_callback_rate_limited(client, monkeypatch):
+    """回调也要限流：一个死循环脚本就能把线程刷干"""
+    monkeypatch.setattr("server.app.routes.bot._spawn", lambda a, p: None)
+    from server.app import ratelimit
+    from server.app.routes import bot as bot_route
+
+    ratelimit.reset("bot:127.0.0.1")
+    monkeypatch.setattr(bot_route, "BOT_RATE_LIMIT", 2)
+
+    codes = [client.post("/api/v1/bot/onebot", json=_event("汇总")).status_code for _ in range(3)]
+
+    assert codes == [200, 200, 429]
+    ratelimit.reset("bot:127.0.0.1")
 
 
 def test_onebot_callback_swallows_empty_body(client, monkeypatch):

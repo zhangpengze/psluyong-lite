@@ -45,7 +45,7 @@ def run():
     day = _parse_day(payload.get("date"))
     push = bool(payload.get("push", True))
 
-    result = run_daily(current_app, day, push=push)
+    result = run_daily(current_app, day, push=push, record_status=push)
     logger.info("手动触发日报 date=%s push=%s result=%s", day, push, result["message"])
     log_action(
         "push_report" if push else "run_report",

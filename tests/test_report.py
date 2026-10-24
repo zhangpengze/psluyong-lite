@@ -27,9 +27,21 @@ def isolated_data_dir(monkeypatch, tmp_path):
 
 
 class _Resp:
-    def __init__(self, status_code: int, text: str = ""):
+    """假响应。json_body 为 None 时 .json() 抛 ValueError，模拟"不是 JSON"。
+
+    必须支持 body：OneBot 的失败语义在响应体里，只给 status_code 的假对象
+    会让"HTTP 200 但 body 失败"这类真事故永远测不出来。
+    """
+
+    def __init__(self, status_code: int, text: str = "", json_body=None):
         self.status_code = status_code
         self.text = text
+        self._json = json_body
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("Response is not JSON")
+        return self._json
 
 
 @pytest.fixture
@@ -88,6 +100,93 @@ def test_push_fails_after_all_attempts(napcat_cfg, monkeypatch):
     assert ok is False
     assert len(attempts) == report_mod.PUSH_ATTEMPTS == 3
     assert "已重试 3 次" in msg
+
+
+def test_push_ok_http_but_failed_body_is_failure(napcat_cfg, monkeypatch):
+    """HTTP 200 + {"status":"failed"} 必须判失败（真事故形态）
+
+    群号写错 / 机器人被踢出群 / Token 轮换后没同步 / 被风控 / 消息超长，
+    OneBot 全部回 200。以前只看状态码，于是日志、徽标、仪表盘一起绿，
+    群里一条消息都没有，兜底告警也永远不会触发。
+    """
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(url)
+        return _Resp(200, json_body={"status": "failed", "retcode": 100, "message": "GROUP_NOT_FOUND"})
+
+    _patch_post(monkeypatch, fake_post)
+    ok, msg = report_mod.push_to_group("测试日报内容")
+
+    assert ok is False, "HTTP 200 但 body 说失败，不能报成功"
+    assert "GROUP_NOT_FOUND" in msg and "100" in msg
+    assert len(calls) == 1, "body 里是业务拒绝，重发同样失败，不该重试"
+
+
+def test_push_ok_http_nonzero_retcode_is_failure(napcat_cfg, monkeypatch):
+    """status 看着正常但 retcode≠0：仍判失败（部分实现只填 retcode）"""
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        return _Resp(200, json_body={"status": "ok", "retcode": 1404, "msg": "群不存在"})
+
+    _patch_post(monkeypatch, fake_post)
+    ok, msg = report_mod.push_to_group("x")
+
+    assert ok is False
+    assert "1404" in msg and "群不存在" in msg
+
+
+def test_push_4xx_not_retried(napcat_cfg, monkeypatch):
+    """4xx 是请求本身被拒（Token 错/群号写错），重试只会让人晚 20 秒才知道"""
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(url)
+        return _Resp(403, "forbidden")
+
+    _patch_post(monkeypatch, fake_post)
+    ok, msg = report_mod.push_to_group("x")
+
+    assert ok is False
+    assert len(calls) == 1
+    assert "不重试" in msg
+
+
+def test_run_daily_records_not_pushed_when_body_failed(app, isolated_data_dir, napcat_cfg, monkeypatch):
+    """推送状态文件必须跟着真实结果走：body 失败就不能写「已推送」"""
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        return _Resp(200, json_body={"status": "failed", "retcode": 1200, "message": "风控拦截"})
+
+    _patch_post(monkeypatch, fake_post)
+    day = date(2026, 10, 19)
+
+    result = report_mod.run_daily(app, day, push=True)
+
+    assert result["pushed"] is False
+    status_file = isolated_data_dir / "reports" / "2026-10-19.status.json"
+    data = json.loads(status_file.read_text(encoding="utf-8"))
+    assert data["pushed"] is False
+    assert "风控拦截" in data["message"]
+    assert Path(result["path"]).exists(), "推送失败不影响日报存档"
+
+
+def test_manual_run_without_push_keeps_pushed_badge(admin_client, admin_csrf, isolated_data_dir):
+    """「只生成不推送」不能把定时任务推过的「已推送」徽标刷成未推送"""
+    day = date(2026, 10, 18)
+    report_mod.save_push_status(day, {
+        "date": day.isoformat(), "pushed": True,
+        "message": "推送成功", "pushed_at": "2026-10-18T18:00:01",
+    })
+
+    resp = admin_client.post(
+        "/api/v1/reports/run", json={"date": day.isoformat(), "push": False}, headers=admin_csrf
+    )
+
+    assert resp.status_code == 200
+    data = json.loads((isolated_data_dir / "reports" / "2026-10-18.status.json").read_text(encoding="utf-8"))
+    assert data["pushed"] is True, "只生成不推送把历史徽标覆盖了"
+    assert data["message"] == "推送成功"
 
 
 def test_push_skipped_when_unconfigured(monkeypatch):

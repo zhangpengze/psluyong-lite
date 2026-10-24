@@ -111,16 +111,54 @@ def build_period_report(app, start: date, end: date) -> str:
     return _render(_collect_stats(app, start, end))
 
 
+def _verify_onebot_response(resp) -> tuple[bool, str]:
+    """校验 OneBot v11 的**响应体**，HTTP 200 不代表推成功。
+
+    为什么必须看 body：OneBot 的失败语义放在响应体里——
+      HTTP 200 + {"status":"failed","retcode":100,"message":"GROUP_NOT_FOUND"}
+    群号写错、机器人被踢出群、Token 轮换后没同步、被风控、消息超长，
+    全都走这条路径。只看 status_code 的结果是：日志绿、日报徽标绿、仪表盘绿，
+    群里一条消息都没有；而且"定时日报未推送成功"这条兜底告警的判断条件就是
+    pushed 为假，于是它**永远不会触发**——整套告警是有洞的。
+    """
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 - 非 JSON（老版本 NapCat / 反代错误页）
+        return True, ""
+    if not isinstance(payload, dict):
+        return True, ""
+
+    status = str(payload.get("status") or "").strip().lower()
+    retcode = payload.get("retcode")
+    try:
+        retcode_int = int(retcode) if retcode is not None else None
+    except (TypeError, ValueError):
+        retcode_int = -1  # 拿到看不懂的 retcode，按失败处理（宁可误报也别假成功）
+    if status == "failed" or (retcode_int is not None and retcode_int not in (0, 1)):
+        reason = (
+            payload.get("message") or payload.get("wording") or payload.get("msg") or "未知原因"
+        )
+        return False, f"{reason}（status={status or '-'} retcode={retcode}）"
+    return True, ""
+
+
 def _post_with_retry(action: str, payload: dict, description: str) -> tuple[bool, str]:
-    """带重试的 OneBot 动作调用。description 只用于日志，不带密钥。"""
+    """带重试的 OneBot 动作调用。description 只用于日志，不带密钥。
+
+    重试边界按"重发一次会不会有不同结果"划：
+      - 连接异常 / 超时 / 5xx：对方可能只是抖一下，退避重试
+      - 4xx：请求本身被拒（Token 错、群号写错、消息过长），重发同样失败，
+        立刻返回——重试只会让人晚 20 秒才知道群里没消息
+      - 200 但 body 说 failed：业务失败（群不存在/被踢/风控），同样不重试
+    """
     from server.app.config import Config
 
     webhook = Config.NAPCAT_WEBHOOK.rstrip("/")
     if not webhook:
         logger.info("未配置 NAPCAT_WEBHOOK，跳过%s（日报已存档）", description)
         return False, "未配置 NAPCAT_WEBHOOK，已跳过推送"
-    if not Config.REPORT_GROUP_ID and action == "send_group_msg":
-        logger.warning("已配置 NAPCAT_WEBHOOK 但缺少 REPORT_GROUP_ID，跳过%s", description)
+    if action == "send_group_msg" and not str(payload.get("group_id") or "").strip():
+        logger.warning("已配置 NAPCAT_WEBHOOK 但缺少群号（REPORT_GROUP_ID），跳过%s", description)
         return False, "缺少 REPORT_GROUP_ID，已跳过推送"
 
     import requests
@@ -133,14 +171,32 @@ def _post_with_retry(action: str, payload: dict, description: str) -> tuple[bool
     for attempt in range(1, PUSH_ATTEMPTS + 1):
         try:
             resp = requests.post(f"{webhook}/{action}", json=payload, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                logger.info("%s成功（%s）", description, action)
-                return True, "推送成功"
-            last = f"推送失败 HTTP {resp.status_code}"
-            logger.error("第 %d/%d 次%s失败: %s %s", attempt, PUSH_ATTEMPTS, description, resp.status_code, resp.text[:200])
         except requests.RequestException as e:
             last = f"推送异常: {e}"
             logger.error("第 %d/%d 次%s异常: %s", attempt, PUSH_ATTEMPTS, description, e)
+            if attempt < PUSH_ATTEMPTS:
+                wait = PUSH_BACKOFF_S[min(attempt - 1, len(PUSH_BACKOFF_S) - 1)]
+                logger.warning("%ds 后重试%s", wait, description)
+                time.sleep(wait)
+            continue
+
+        body = getattr(resp, "text", "") or ""
+        if 400 <= resp.status_code < 500:
+            logger.error("%s被拒绝 HTTP %s（不重试）: %s", description, resp.status_code, body[:200])
+            return False, f"推送失败 HTTP {resp.status_code}（请求被拒绝，不重试）: {body[:120]}"
+
+        if resp.status_code == 200:
+            ok, detail = _verify_onebot_response(resp)
+            if ok:
+                logger.info("%s成功（%s）", description, action)
+                return True, "推送成功"
+            logger.error("%s被 OneBot 拒绝（HTTP 200 但 body 失败）: %s", description, detail)
+            return False, f"推送被 OneBot 拒绝: {detail}"
+
+        last = f"推送失败 HTTP {resp.status_code}"
+        logger.error(
+            "第 %d/%d 次%s失败: %s %s", attempt, PUSH_ATTEMPTS, description, resp.status_code, body[:200]
+        )
         if attempt < PUSH_ATTEMPTS:
             wait = PUSH_BACKOFF_S[min(attempt - 1, len(PUSH_BACKOFF_S) - 1)]
             logger.warning("%ds 后重试%s", wait, description)
@@ -148,13 +204,17 @@ def _post_with_retry(action: str, payload: dict, description: str) -> tuple[bool
     return False, f"{last}（已重试 {PUSH_ATTEMPTS} 次）"
 
 
-def push_to_group(content: str) -> tuple[bool, str]:
-    """推送到 QQ 群。未配置视为"跳过"而非失败；失败自动重试。"""
+def push_to_group(content: str, group_id=None) -> tuple[bool, str]:
+    """推送到 QQ 群。未配置视为"跳过"而非失败；失败自动重试。
+
+    group_id 为空时用 REPORT_GROUP_ID（定时日报）。指定 group_id 只用于
+    「群内指令私聊失败后回原群」——绝不能借默认值把报表发到别的群去。
+    """
     from server.app.config import Config
 
-    group_id = Config.REPORT_GROUP_ID
+    target = str(group_id) if group_id is not None else Config.REPORT_GROUP_ID
     payload = {
-        "group_id": int(group_id) if group_id.isdigit() else group_id,
+        "group_id": int(target) if target.isdigit() else target,
         "message": [{"type": "text", "data": {"text": content}}],
     }
     return _post_with_retry("send_group_msg", payload, "日报推送")

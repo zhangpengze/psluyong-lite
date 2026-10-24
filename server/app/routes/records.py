@@ -19,6 +19,7 @@ from ..auth import admin_required, api_key_required, api_or_session, csrf_protec
 from ..models import STATUS_FAILED, STATUS_SUCCESS
 from ..services import records_lifecycle, records_read, records_service
 from ..storage import ImageValidationError, resolve_image_path
+from ..upload_guard import upload_guard
 from . import records_csv
 
 bp = Blueprint("records", __name__, url_prefix="/api/v1/records")
@@ -49,8 +50,13 @@ def _read_filters() -> dict:
 
 @bp.post("")
 @api_key_required
+@upload_guard
 def create_record():
-    """客户端提交一条录用记录（multipart，图片可选）"""
+    """客户端提交一条录用记录（multipart，图片可选）
+
+    限流在 `upload_guard` 里、先于本函数执行——请求体最大 64MB，等解析完
+    再拒绝等于替对方把内存和磁盘都用掉一遍。
+    """
     form = request.form
 
     employee_name = _clean(form.get("employee_name"), 100)

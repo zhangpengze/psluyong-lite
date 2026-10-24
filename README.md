@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               845 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               870 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -47,6 +47,9 @@ tests/               845 个用例，覆盖 API、权限、去重与失败重试
                      硬超时看门狗（无人轮询也收任务/超时不报成功）、
                      关文档失败的警告通路、父进程看门狗与端口占用探针、
                      Rust 侧源码守卫（CRLF 归一/变量名跨语言一致）、
+                     上传闸门（单来源+全站、限流先于读 body、429 不被当业务拒绝）、
+                     日报正文长度上限（按字节按行截断/存档仍是全文）、
+                     目录统计缓存（mtime 失效/过期重扫/容量上限）、
                      员工手册与界面文案同步
 ```
 
@@ -126,7 +129,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（845 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（870 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -211,6 +214,9 @@ cd client/src-tauri && cargo test --lib          # 13 个：贴边方向/多屏/
 | PS 里的文档越叠越多，最后报暂存盘不足 | 关文档的失败不再 `logger.debug("（可忽略）")`：`close_document` 返回原因，runner 把它挂到本次结果的 warnings 上 | 每张图打开一个模板文档，正常靠 `close` 收尾。之前关失败被完全吞掉，文档就留在 PS 里，一天几十张之后 PS 报暂存盘不足/变慢，而日志里一个字都没有——员工只知道"越用越卡" |
 | Tauri 被强杀后 sidecar 变成僵尸，前端连的是上一轮那个 | Tauri 启动 sidecar 时写 `PSLUYONG_PARENT_PID`；sidecar 和 worker 各自每 2 秒 `OpenProcess`+`WaitForSingleObject` 探一次，爹没了就 `os._exit` | 僵尸 sidecar 一直占着 8765，新 sidecar 绑不上端口、stdout 又是 `Stdio::null()`，静默死掉；前端于是连到旧进程：busy 永远 true、配置是旧的、日志里没有任何线索。Windows 上不能用 `os.kill(pid, 0)` 判活——任何非 CTRL_C 的信号都会**杀掉**对方 |
 | 8765 被占时两次启动"看起来都成功" | 启动前裸 `bind` 探一次端口（`probe_port`），被占就写清"很可能是上一次的 sidecar 还活着"并 `SystemExit(1)` | Windows 上 werkzeug 开了 `SO_REUSEADDR`，端口被占时 `app.run` 有可能绑得上——两个 sidecar 同时活着，请求落到谁手里看运气 |
+| 上传接口可以被无限次调用 | 每来源 30 次/分 + 全站 300 次/分两道闸（`upload_guard`），**在解析请求体之前**挡住 | 一条记录能带 64MB 图：一个写错的循环、一个被捡到的 API Key、一段重放旧请求的脚本，几分钟就能把 NAS 写满。做成装饰器而不是视图第一行，"先限流后读 body"是结构性保证；返回 429 而不是 400，因为 sidecar 队列只删 400/409/422——限流一次就丢一条记录 |
+| 日报正文超长，整条被群拒发 | 发送前按**字节**、按**行**截到 4000 以内并注明"已省略 N 行，完整版见后台"；存档的 `.md` 仍是全文 | 伙伴数 × 模板名（200 字符）轻易过万字符，OneBot 对超长文本是整条拒发（retcode 100）。最忙的那天（数据最多、最该报出去）群里反而一条消息都没有。按字节是因为一个汉字 3 字节——按字符数判断会以为还很空 |
+| 仪表盘每 30 秒全量遍历图片目录 | `dir_usage` 按**目录层**缓存（mtime 失效 + 5 分钟 TTL + 容量上限），合计每次用缓存的分层结果重算 | 几万张图就是几万次 stat，而且全是重复劳动：图片按 年/月/日 分层、文件名是 uuid，写进去就不再变。只缓存"子树合计"的话，孙目录里删一个文件上层会一直报旧值 |
 
 ## 部署
 

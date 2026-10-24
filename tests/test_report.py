@@ -514,3 +514,101 @@ def test_push_alert_skipped_when_unconfigured(monkeypatch):
     ok, msg = report_mod.push_alert("x")
     assert ok is False
     assert "未配置" in msg
+
+
+# ---------- 正文长度上限（QQ 单条消息） ----------
+# 伙伴数 × 模板名（200 字符）能轻易把日报撑到上万字符，而 OneBot 对超长文本
+# 是整条拒发（retcode 100）。那种失败会被 P0-1 的 body 校验判成"推送失败"，
+# 于是最忙的那天（数据最多、最该报出去的那天）群里一条消息都没有。
+# 处理方式：只截"要发出去的那份"，存档的 .md 永远是全文。
+
+
+def _long_report(lines: int = 200) -> str:
+    """每行都带中文（3 字节/字），保证 200 行一定超过上限"""
+    return "\n".join(f"  · 合作伙伴{i}：模板{i}：{i} 条" for i in range(lines))
+
+
+def test_clamp_leaves_short_text_alone():
+    from bot.report_render import clamp_for_message
+
+    text = "【2026-10-24 期刊录用日报】\n总录用：3 条"
+
+    assert clamp_for_message(text) == (text, 0)
+
+
+def test_clamp_counts_bytes_not_characters():
+    """中文一个字 3 字节：按字符数判断长度会以为还很空，实际早就超了"""
+    from bot.report_render import MESSAGE_MAX_BYTES, clamp_for_message
+
+    text = "中" * 2000  # len() == 2000 < 4000，但 bytes == 6000
+    assert len(text) < MESSAGE_MAX_BYTES < len(text.encode("utf-8"))
+
+    clamped, dropped = clamp_for_message(text)
+
+    assert dropped == 1
+    assert clamped != text
+
+
+def test_clamp_keeps_whole_lines():
+    from bot.report_render import clamp_for_message
+
+    original = _long_report(300)
+    clamped, dropped = clamp_for_message(original)
+
+    assert dropped > 0
+    body = clamped.splitlines()
+    tail = body[-1]
+    assert "已省略" in tail and "完整版见后台" in tail
+    for line in body[:-1]:
+        assert line in original, f"截断把一行切坏了：{line!r}"
+
+
+def test_push_sends_the_clamped_text(napcat_cfg, monkeypatch):
+    """真正发出去的那份必须是截断后的：只算不截等于没做"""
+    from bot.report_render import MESSAGE_MAX_BYTES
+
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.append(json)
+        return _Resp(200)
+
+    _patch_post(monkeypatch, fake_post)
+    ok, _ = report_mod.push_to_group(_long_report(300))
+
+    assert ok is True
+    text = sent[0]["message"][0]["data"]["text"]
+    assert len(text.encode("utf-8")) <= MESSAGE_MAX_BYTES + 200, "还是超了上限"
+    assert "已省略" in text
+
+
+def test_run_daily_pushes_clamped_but_archives_full(app, isolated_data_dir, napcat_cfg, monkeypatch):
+    """存档是全文、发送是截断——"完整版见后台"这句承诺得是真的"""
+    from bot.report_render import MESSAGE_MAX_BYTES
+
+    huge = _long_report(300)
+    monkeypatch.setattr(report_mod, "render", lambda *a, **k: huge)
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.append(json)
+        return _Resp(200)
+
+    _patch_post(monkeypatch, fake_post)
+    result = report_mod.run_daily(app, date(2026, 10, 24), push=True)
+
+    archived = Path(result["path"]).read_text(encoding="utf-8")
+    assert archived == huge, "存档必须是全文，否则「完整版见后台」是假的"
+    pushed = sent[0]["message"][0]["data"]["text"]
+    assert len(pushed.encode("utf-8")) < len(huge.encode("utf-8"))
+    assert len(pushed.encode("utf-8")) <= MESSAGE_MAX_BYTES + 200
+    assert result["content"] == huge, "接口返回的正文仍应是全文（后台页面要显示它）"
+
+
+def test_clamp_payload_leaves_other_shapes_alone():
+    """形状不对就原样放行：群里发图/at 的调用不走这里，绝不猜"""
+    from bot.report_render import clamp_payload
+
+    payload = {"group_id": 1, "message": [{"type": "image", "data": {"file": "x.jpg"}}]}
+
+    assert clamp_payload(payload) == (payload, 0)

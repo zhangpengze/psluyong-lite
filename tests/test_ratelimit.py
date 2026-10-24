@@ -75,3 +75,49 @@ def test_sweep_reclaims_expired_keys_before_growth(rl):
     assert ratelimit.hit("login:new", limit=5, window=60) == (True, 0)
     # 过期键被删除，只留下本次真正活跃的键
     assert set(ratelimit._HITS) == {"login:new"}
+
+
+# ---------- 上传闸门 ----------
+# 登录限流只对"失败"计数；上传闸门每次请求都算一次（每次都要写 64MB 到盘上）。
+# 重点不是"能不能计数"，而是两道闸门的顺序：被自己那道拦住的人，不该顺手
+# 把全站额度也消耗掉。
+
+
+def test_upload_allowed_blocks_the_source_first(rl, monkeypatch):
+    monkeypatch.setattr(ratelimit, "UPLOAD_PER_SOURCE", 2)
+    monkeypatch.setattr(ratelimit, "UPLOAD_GLOBAL", 100)
+
+    assert ratelimit.upload_allowed("10.0.0.1")[0] is True
+    assert ratelimit.upload_allowed("10.0.0.1")[0] is True
+    allowed, retry_after = ratelimit.upload_allowed("10.0.0.1")
+
+    assert allowed is False
+    assert retry_after >= 1
+
+
+def test_blocked_source_does_not_eat_the_global_quota(rl, monkeypatch):
+    monkeypatch.setattr(ratelimit, "UPLOAD_PER_SOURCE", 1)
+    monkeypatch.setattr(ratelimit, "UPLOAD_GLOBAL", 2)
+
+    assert ratelimit.upload_allowed("10.0.0.1")[0] is True  # 来源 1 次 + 全站 1 次
+    assert ratelimit.upload_allowed("10.0.0.1")[0] is False  # 被来源那道拦住，不记全站
+
+    assert ratelimit.upload_allowed("10.0.0.2")[0] is True  # 全站还剩 1 次
+    assert ratelimit.upload_allowed("10.0.0.3")[0] is False  # 全站用光
+
+
+def test_global_quota_is_shared_across_sources(rl, monkeypatch):
+    monkeypatch.setattr(ratelimit, "UPLOAD_PER_SOURCE", 100)
+    monkeypatch.setattr(ratelimit, "UPLOAD_GLOBAL", 2)
+
+    assert ratelimit.upload_allowed("10.0.0.1")[0] is True
+    assert ratelimit.upload_allowed("10.0.0.2")[0] is True
+    assert ratelimit.upload_allowed("10.0.0.3")[0] is False
+
+
+def test_missing_source_is_grouped_not_crashed(rl, monkeypatch):
+    """remote_addr 可能是 None（某些代理/单元测试路径），不能因此 500"""
+    monkeypatch.setattr(ratelimit, "UPLOAD_PER_SOURCE", 1)
+
+    assert ratelimit.upload_allowed(None)[0] is True
+    assert ratelimit.upload_allowed("")[0] is False  # 与 None 同一个桶

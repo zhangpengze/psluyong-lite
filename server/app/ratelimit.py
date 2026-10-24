@@ -59,3 +59,32 @@ def reset(key: str) -> None:
     """登录成功后清空该来源的失败记录"""
     with _LOCK:
         _HITS.pop(key, None)
+
+
+# ---------- 上传闸门（录用记录带图提交） ----------
+# 单条记录最大 64MB（MAX_CONTENT_LENGTH）。一个人写出死循环、或者同一台机器
+# 上有个脚本在重放旧请求，几分钟就能把 NAS 的盘写满、把内存吃穿——而正常
+# 员工是"出一张图提交一次"，几分钟一次都算快的，所以额度可以给得很宽。
+UPLOAD_PER_SOURCE = 30
+# 全站合计（跨来源）：10 个人各自 30 次/分钟就是 300 张图，再高就该拦了
+UPLOAD_GLOBAL = 300
+UPLOAD_WINDOW_S = 60
+
+# 分桶键用 request.remote_addr（客户端 IP），不读 X-Forwarded-For：那是个
+# 请求头，谁都能填，读它等于把限流交给攻击者开。
+# ⚠️ 如果哪天真在 waitress 前面加一层 nginx，所有人的 remote_addr 都会变成
+# 反代自己，于是全公司挤进同一个来源桶（30 次/分）——那时必须给应用装
+# werkzeug 的 ProxyFix，否则这个闸门会误伤正常提交。
+
+
+def upload_allowed(source: str) -> tuple[bool, int]:
+    """两道闸门：单来源 + 全站合计。返回 (是否放行, 建议等待秒数)。
+
+    单来源先判、放行后才记全站额度：某人被自己那道闸门拦住时不该顺带
+    消耗别人的额度。
+    """
+    key = f"upload:{source or '-'}"
+    allowed, retry_after = hit(key, UPLOAD_PER_SOURCE, UPLOAD_WINDOW_S)
+    if not allowed:
+        return False, retry_after
+    return hit("upload:*", UPLOAD_GLOBAL, UPLOAD_WINDOW_S)

@@ -78,6 +78,20 @@ def admin_csrf(admin_client):
     return {"X-CSRF-Token": match.group(1)}
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """每条用例从空计数开始。
+
+    限流是**跨请求**的状态：整个测试会话共用一个 app（同一来源 127.0.0.1），
+    跑完几十条"提交记录"的用例之后，后面全部变成 429——失败信息还完全指错地方
+    （看着像业务接口坏了）。生产里这个窗口只有 60 秒，测试里得手动清。
+    """
+    from server.app import ratelimit
+
+    ratelimit._HITS.clear()
+    yield
+
+
 @pytest.fixture()
 def clean_db(app):
     """每个用例前清空业务表，避免用例间互相污染"""

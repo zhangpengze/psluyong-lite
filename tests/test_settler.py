@@ -339,3 +339,23 @@ def test_sidecar_main_starts_task_settler(monkeypatch):
     sc_server.main()
 
     assert started, "sidecar 启动时没有拉起任务结算：关窗丢记录的问题会原样回来"
+
+
+def test_429_on_settle_keeps_the_record_in_the_offline_queue(data_dir, cfg):
+    """服务端限流（429）不是"这条数据有问题"，必须入队而不是丢掉
+
+    服务端刚给 `POST /api/v1/records` 加了上传闸门，429 从此是正常路径上会出现
+    的一种回答。侧边这里如果按"业务拒绝"处理，员工那张图对应的记录就永久没了——
+    而图还在输出目录里躺着，谁也不会发现少了一条。
+    """
+    make_task(data_dir)
+    fake = FakeClient(fail_status=429)
+
+    payload = settler.settle_task(TASK_ID, lambda c: fake, cfg=cfg)
+
+    assert payload["uploaded"] is False
+    assert payload["queued"] is True
+    assert len(queue.pending()) == 1, "429 之后记录必须留在本地队列里"
+    assert "429" in payload["upload_message"]
+    item = queue.load(queue.pending()[0])
+    assert item["blocked_reason"], "受阻原因要落盘，界面才能告诉员工在等什么"

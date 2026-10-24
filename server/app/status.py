@@ -53,21 +53,6 @@ SYS_COMPONENTS = [
 ]
 
 
-def _dir_usage(root: Path) -> tuple[int, int]:
-    """递归统计文件数与总字节，坏掉的软链/权限错误直接跳过"""
-    files = total = 0
-    if not root.exists():
-        return 0, 0
-    for entry in root.rglob("*"):
-        try:
-            if entry.is_file():
-                files += 1
-                total += entry.stat().st_size
-        except OSError:
-            continue
-    return files, total
-
-
 def _filesize(value) -> str:
     if not value:
         return "-"
@@ -191,8 +176,9 @@ def _report_row() -> dict:
 
 def _images_row() -> dict:
     from .config import Config, IMAGES_DIR
+    from .dir_usage import dir_usage
 
-    count, size_bytes = _dir_usage(IMAGES_DIR)
+    count, size_bytes = dir_usage(IMAGES_DIR)
     threshold = Config.DISK_ALERT_GB
     limit_bytes = threshold * 1024**3 if threshold else 0
     if limit_bytes and size_bytes >= limit_bytes:
@@ -211,7 +197,7 @@ def _safe_row(name: str, builder) -> dict:
     """取数失败的单行降级成红色行，不牵连整张卡。
 
     这张卡和 /api/v1/stats/overview 共用同一份数据：以前 _database_row 里的
-    `Record.query.count()` 没有 try/except（同文件的 _dir_usage / _backup_row
+    `Record.query.count()` 没有 try/except（同文件的 _images_row / _backup_row
     都做了降级），WAL 下高峰期一次锁冲突就让整张卡连同概览接口一起 500——
     而"系统到底好不好"恰恰是最该在故障时能打开的那一页。
     """

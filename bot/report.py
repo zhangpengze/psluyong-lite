@@ -28,7 +28,7 @@ from .report_alert import (
     reset_alert_throttle,
     reset_ops_alert_throttle,
 )
-from .report_render import render
+from .report_render import clamp_payload, render
 from .report_stats import _collect_stats, stats_fingerprint
 from .report_store import load_push_status, save_push_status, save_report
 
@@ -113,6 +113,15 @@ def _post_with_retry(action: str, payload: dict, description: str) -> tuple[bool
         return False, "缺少 REPORT_GROUP_ID，已跳过推送"
 
     import requests
+
+    # 发送前最后一道：QQ 单条消息有长度上限，超了 OneBot 整条拒发（retcode 100），
+    # 群里没消息而"推送成功"的假象要靠 body 校验才拦得住——所以不如先截断。
+    # 截的是发送副本，存档的 .md 仍是全文，尾部那句"完整版见后台"才成立。
+    payload, dropped = clamp_payload(payload)
+    if dropped:
+        logger.warning(
+            "%s内容超长，已省略 %s 行（完整版见后台「每日日报」存档）", description, dropped
+        )
 
     headers = {"Content-Type": "application/json"}
     if Config.NAPCAT_TOKEN:

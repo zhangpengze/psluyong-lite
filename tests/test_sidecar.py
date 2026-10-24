@@ -989,3 +989,54 @@ def test_open_folder_allows_app_data_dir(sc, configured, monkeypatch):
     monkeypatch.setattr(os, "startfile", lambda p: opened.append(str(p)), raising=False)
 
     assert _open_folder(sc, str(app_data_dir())).get_json()["ok"] is True
+
+
+# ---------- task_id 形态校验（路径穿越入口） ----------
+# task_id 来自请求，却直接拼进 <data>/executions/<task_id>。400 而不是静默放行：
+# 前端自己生成的 id 一定合法，能带上来的只有手改的串或坏掉的缓存。
+
+
+def test_status_rejects_illegal_task_id(sc, configured):
+    resp = sc.get("/export/status?task_id=../../Windows/win.ini")
+
+    assert resp.status_code == 400
+    assert "task_id" in resp.get_json()["error"]
+
+
+def test_cancel_rejects_illegal_task_id(sc, configured):
+    resp = sc.post("/export/cancel", json={"task_id": r"..\..\x"})
+
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_legal_but_unknown_task_id_is_not_an_error(sc, configured):
+    """对照组：合法的 id 只是"不知道这个任务"，不能也回 400
+
+    没有这一条，把校验写成"只要不是内存里那个 id 就拒"也会绿——那会把
+    前端正常的迟到轮询全打成错误。
+
+    id 特意选一个"别的用例不可能创建过"的：整个会话共用一个数据目录，
+    用 OLD_TASK_ID 那种值会读到上一个用例留下的 status.json，
+    于是这条用例变成"结算了一条真任务"，跟它想测的东西无关。
+    """
+    resp = sc.get("/export/status?task_id=19990101-000000-deadbeef")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["finished"] is False
+
+
+def test_unknown_task_id_creates_no_phantom_failure_record(sc, configured, monkeypatch):
+    """不存在任务目录的迟到轮询不许提交记录
+
+    踩到的真形状：`executor.status()` 对一个没见过的 id 会编出
+    `{"state": "unknown", "finished": True}`，路由把它当成终态交给结算，
+    结算就按"失败"提交了一条记录——后台那条失败谁都没做过，成功率还替它扣分。
+    """
+    fake = FakeClient()
+    monkeypatch.setattr(sidecar_server, "_client", lambda cfg: fake)
+
+    resp = sc.get("/export/status?task_id=19990101-000000-deadbeef")
+
+    assert resp.status_code == 200
+    assert fake.submitted == [], "不存在的任务不该产生任何上报"

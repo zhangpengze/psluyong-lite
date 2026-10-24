@@ -51,3 +51,71 @@ def test_sidecar_启动处确实把_pid_传下去了():
 
     assert "\n    tag_parent_pid(&mut cmd);\n" in src, "resolve_sidecar 包装层漏了 pid 传递"
     assert "resolve_sidecar_raw(app)?" in src, "所有返回路径都要经过同一个包装函数"
+
+
+def test_sidecar_启动后要放进_job():
+    """Tauri 被强杀时，只有内核级 job 能一次收走 sidecar 与 worker
+
+    漏调 `win_job::guard` 不会让任何逻辑测试变红——它只是悄悄少了一层兜底，
+    所以这条（和 lib.rs 里那条同源的守卫）盯的是"有没有接线"。
+    CI 不跑 cargo，所以 Python 侧必须有这一份。
+    """
+    src = _lib_source()
+
+    assert "\nmod win_job;\n" in src, "模块没声明，guard 编译不进来"
+    assert "win_job::guard(&child)" in src, "spawn 之后没有调 guard，兜底是空的"
+
+
+def test_job_对象打开的是杀进程开关():
+    """KILL_ON_JOB_CLOSE 才是全部意义；设错了这个 job 就只是个摆设"""
+    job_src = (ROOT / "client" / "src-tauri" / "src" / "win_job.rs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in job_src
+    assert "SetInformationJobObject" in job_src, "只建 job 不设 limit，等于没开兜底"
+
+
+def _win_job_source() -> str:
+    return (
+        ROOT / "client" / "src-tauri" / "src" / "win_job.rs"
+    ).read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def _win_job_code() -> str:
+    """去掉 `//` 注释行：守卫要盯的是代码，注释里提到旧写法不算违规
+
+    第一版守卫没过这一步，被自己那段"这里当初写错了"的注释绊倒——注释里正好
+    引用了 `rc != WAIT_TIMEOUT`，于是守卫恒红。守卫红在正确的事上才有价值，
+    红在注释上纯属噪音。
+    """
+    return "\n".join(
+        ln for ln in _win_job_source().splitlines() if not ln.lstrip().startswith("//")
+    )
+
+
+def test_wait_exit_必须申请_SYNCHRONIZE():
+    """`WaitForSingleObject` 要求句柄带 SYNCHRONIZE，少了它只会拿到 WAIT_FAILED
+
+    这一条是真踩出来的：原来写的是 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`，
+    每次都返回 WAIT_FAILED，被判成"已退出"——于是两条 job 用例永远绿，
+    `LimitFlags` 改成 0 也照样绿。CI 不跑 cargo，所以这条守卫放在 Python 侧。
+    """
+    code = _win_job_code()
+
+    assert (
+        "OpenProcess(SYNCHRONIZE, FALSE, pid)" in code
+    ), "wait_exit 拿不到 SYNCHRONIZE 就永远'已退出'"
+    assert "rc != WAIT_TIMEOUT" not in code, "WAIT_FAILED 被当成'已退出'了，要三态返回"
+
+
+def test_job_用例先证明进程活着再断言它被杀():
+    """没有前置的"还活着"，用例在进程根本没起来（或 wait_exit 说谎）时照样绿
+
+    对照组（LimitFlags=0 时不杀进程）同样重要：它证明"关句柄杀进程"确实是这个
+    标志位干的，而不是进程碰巧自己退了。
+    """
+    src = _win_job_source()
+
+    assert src.count("assert_alive(child.id());") >= 2, "关闭句柄前后都得先确认它活着"
+    assert "create_job_with_limit(0)" in src, "缺对照组：没有它就无法排除'碰巧自己退了'"

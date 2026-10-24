@@ -139,9 +139,15 @@
 > **第六批已修 3 项**（4、6、7）：都是"一个人就能把服务打挂 / 让最该发的那条发不出去"。
 > 4 是上传接口可以无限次调用（一条 64MB）；6 是最忙那天的日报超长、整条被群拒发；
 > 7 是仪表盘每 30 秒全量遍历图片目录。这一批变异 13/13 全红。
+> **第七批已修 2 项**（18 的 `task_id` 校验、12 的 Job Object 兜底）：这两条原本排灰度期，
+> 都是"一条正则 / 一层内核兜底"就能收掉的口子，顺手补了。变异 9/9 全红。
+> 这一批真正的收获是**发现了一条假绿的用例**（`wait_exit` 少了 `SYNCHRONIZE`，永远返回
+> "已退出"，把 `LimitFlags` 改成 0 也照样过）——守卫本身失效比缺守卫更危险；
+> 也因此把变异判据从"控制台文本里找 ` failed`"换成读 `--junitxml`：中文 Windows 上
+> pytest 输出是 cp936，`text=True` 按 utf-8 解会把 `out` 变成 `None`，真被抓到的变异
+> 会被报成"未抓到"（假阴性让验证本身失真）。
 > 剩下的 5、8 不是纯代码问题：5 要先定部署形态（单进程 or 多副本），
-> 8 要 IT 决定（内网 HTTPS 还是来源 IP 白名单）。外加 18 的 `task_id` 校验、
-> 12 的 Job Object 兜底，仍按原计划排在灰度期处理。
+> 8 要 IT 决定（内网 HTTPS 还是来源 IP 白名单）。
 
 ### 服务端
 1. ✅ **已修**（变异 2/2 全红）**状态卡一行异常打挂整张卡**：`status.py:112-123` `_database_row` 直接 `Record.query...count()`，**没有 try/except**；同文件 `_dir_usage`/`_backup_row` 都做了降级。DB 一锁（WAL 下高峰期可能）→ `/api/v1/stats/overview` 与仪表盘一起 500。
@@ -182,7 +188,9 @@
     → **Windows 上不能 `os.kill(pid, 0)`**：除 `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` 外任何信号都会**杀掉**目标进程——判活变谋杀，用例 `test_alive_does_not_kill_the_target` 就是拿真子进程盯这一条。改用 `OpenProcess(SYNCHRONIZE|QUERY_LIMITED)` + `WaitForSingleObject(h, 0) == WAIT_TIMEOUT`。
     → **端口占用可见化**：启动前先裸 `bind` 一次（`server.probe_port`）。不能在 `SO_REUSEADDR` 的套接字上探——Windows 下那样连被占的端口都能绑上（werkzeug 正是这么设的），两个 sidecar 会同时活着；裸 bind 则老老实实报 10048。被占时写清"很可能是上一次的 sidecar 还活着"并 `SystemExit(1)`，`app.run` 自己抛的 OSError 也兜住再退。
     → 用例 `tests/test_parent_watch.py`（20 条）+ `tests/test_sidecar_startup.py`（8 条）+ `lib.rs::parent_pid_tests`（3 条）。
-    → ⚠️ **Job Object（`KILL_ON_JOB_CLOSE`）没做**：那是"连孙进程一起收"的兜底，与看门狗互补。当前靠看门狗已能保证"爹没了它自己走"，但 Tauri 被 `TerminateProcess` 时看门狗有最多 2 秒窗口期，且孙进程（worker）的回收仍依赖 sidecar 先死。灰度期继续挂着。
+    → ✅ **Job Object 兜底已补**（变异 2/2 全红，另加 Python 镜像守卫 1/1）：`client/src-tauri/src/win_job.rs`。sidecar **先入 job、后按需起 worker**，所以 worker 天生在 job 里；`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 打开后，Tauri 被 `TerminateProcess` 时句柄由 OS 关闭，内核把整棵树收走——`TerminateProcess` 下 Python 一行都执行不到，看门狗那 2 秒窗口并不存在。job 句柄**故意永不关闭**（关掉就等于立刻杀掉 sidecar），它的生命周期正是"Tauri 进程还活着"。入 job 失败只 `eprintln!` 不拦启动：兜底不该让客户端起不来。
+    → 已知边界写进文件头注释：只能管"入 job 之后"生出来的子进程（顺序不能反）；Java/某些安装器会创建 breakaway job，但本进程树里没有。
+    → ⚠️ **这一批最值得记的不是功能，是那条假绿的用例**：`关掉最后一个句柄会带走子进程` 一直"通过"，把 `LimitFlags` 改成 0 也照样通过。原因是 `wait_exit` 里 `OpenProcess` 只申请了 `PROCESS_QUERY_LIMITED_INFORMATION`，**没有 `SYNCHRONIZE`**，`WaitForSingleObject` 每次返回 `WAIT_FAILED`，被 `rc != WAIT_TIMEOUT` 判成"已退出"。现在改成三态返回（已退出/仍在跑/**不知道**），每次关句柄前先断言"子进程还活着"，再补一条 `LimitFlags=0` 的**对照组**必须活下来——对照组证明"杀进程"确实是这个标志位干的，而不是进程碰巧自己退了。
 13. ✅ **已修**（变异 2/2 全红）**生成成功后 `saveConfig` 抛异常会把结果翻成"生成失败"**（`useExportTask.ts:119-140` 成功分支与 catch 在同一个 try）：图已生成、记录已上报，员工看到失败必然再点一次 → 撞 409，白跑一轮 PS。
     → 「记住上次用的模板/作者」抽成 `rememberThisCombo()`，自带 try/catch，失败只 `console.warn`，**不弹 toast**（告诉员工"没记住"除了焦虑没别的用）。清空表单、提示成功、结果条滚动都在它之后，因此都不再被这一步拖累。用例 `client/src/composables/useExportTask.spec.ts`（7 条，其中 4 条专门盯"saveConfig 炸了也必须报成功"）。
 14. ✅ **已修**（变异 2/2 全红）**三个窗口各跑一遍 `startAfterReady`**（`App.vue:107-142`）→ 启动瞬间对同一批 pending 并发 flush；成功记录有唯一索引兜底（409），但 **5xx 的记录会被并发两三轮各记一次 `failures`**——`MAX_ATTEMPTS=5` 提前用完，本该还能重试的记录被提前丢进死信（真丢数据）；两个请求还会同时 `_rewrite` 同一个 json，后写的覆盖前写的。
@@ -200,9 +208,11 @@
     → 新增 `image_buffer.py`：入队时把成品图**复制**进 `%APPDATA%\psluyong-lite\pending_images\{item_id}.jpg`（与队列 json 同名，保住对应关系），补传优先用副本；复制失败（磁盘满/杀软锁文件）只记日志、记录照常入队并退回用原路径。缓冲和原目录**都**找不到时**不提交**、整条转死信（图跟着进 `dead/`，人工点「重试死信」时连图一起搬回缓冲），界面显示"死信 N 条"。副本有保留期：成功落地/业务拒绝时立刻删，超过 7 天且队列与死信里都没有对应 json 的孤儿按天清掉。首次上报那条路（`reporter` 直调 `api_client`）保留"无图也发"（失败记录本来就没图），但补了一条 warning 日志。
     → `api_client` 的 `exists()` 顺手改成 `is_file()`：目录也能通过 `exists()`，`open()` 会抛。
     → 用例 `tests/test_queue.py`（10 条：复制成功/清理输出目录后仍带图补传/两边都没有转死信且**一次都没提交**/复制失败退回原路径/成功后删副本/业务拒绝后删副本/本来无图的记录不判缺图/死信带走图且重试搬回/过期孤儿清理/优先用副本）。
-18. ◐ **`/open-folder` 部分已修**（变异 3/3 全红）**本机写操作面**：`/open-folder` 接受任意 `path`（`routes_shell.py:26-33`）；`task_id` 未做格式校验就拼路径（`routes_export.py:160` + `worker.py:36-37` 会 `mkdir(parents=True)`）。单机桌面场景危害有限，但一条正则就能堵。
+18. ✅ **已修**（`/open-folder` 变异 3/3 全红；`task_id` 变异 5/5 全红）**本机写操作面**：`/open-folder` 接受任意 `path`（`routes_shell.py:26-33`）；`task_id` 未做格式校验就拼路径（`routes_export.py:160` + `worker.py:36-37` 会 `mkdir(parents=True)`）。单机桌面场景危害有限，但一条正则就能堵。
     → 打开目录加白名单：只许**输出目录 / 模板目录 / 本机数据目录**，路径先 `resolve()` 再按 `os.sep` 边界比对（`base + os.sep` 是必须的——裸 `startswith` 会让 `期刊录用2` 被当成 `期刊录用` 的子目录）；Windows 大小写用 `normcase` 归一，`..\..\Windows` 这类串在规范化后绕不出去。前端两处调用（记录页打开输出目录 / 结果条打开成品所在目录）都落在白名单内，行为不变。用例 `tests/test_sidecar.py`（11 条）。
-    → **`task_id` 格式校验仍未做**，继续挂着。
+    → **`task_id` 白名单**（`client/sidecar/task_paths.py`）：字母数字开头、只许 `-` 和 `_`、最长 64 位；另挡 Windows 保留设备名（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）——`CON` 是个合法文件名，但 `open("executions/CON/status.json")` 在 Windows 上打到的是控制台设备，不报错也不落盘。三个入口（`routes_export` 的 status/cancel、`executor.status` 的 fallback、`settler.settle_task`）共用一个 `task_dir()`，各写一份早晚有一处先漂。
+    → **顺带查出一个真 bug**：`executor.status()` 对没见过的 id 会返回 `{"state":"unknown","finished":True}`，路由把它当终态送去结算，于是后台落一条**幽灵失败记录**——成功率被扣，而那条"失败"根本没人做过。修法是把"目录不存在"和"id 非法"都当"没这个任务"：结算直接 `return None`。用例 `test_unknown_task_id_creates_no_phantom_failure_record` 断言 `submitted == []`。
+    → 用例 `tests/test_task_paths.py`（35 条：真实 id 形状、`..`/`../x`/`a/b`/`C:\Windows`/绝对路径/空格/点号/`$`/超长/`None`/int/dict/保留设备名/`task_dir` 不出 `executions/`/不创建目录）+ `tests/test_sidecar.py`（+3）+ `tests/test_settler.py`（+2）+ `tests/test_executor.py`（+2）。
 
 ### 本轮新增的一条（不在原报告里）
 
@@ -284,9 +294,9 @@
 
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
-| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（870 全绿，前端 56 例 + vue-tsc 通过，Rust 13 例） | 每条 P0 有回归用例且做过变异验证 |
+| **第 1 周** | P0-1…P0-7 全部 ✅ 已完成（916 全绿，前端 56 例 + vue-tsc 通过，Rust 18 例） | 每条 P0 有回归用例且做过变异验证 |
 | **第 2 周** | 打第一版带版本号的安装包；3 人灰度（含 1 台老机器/1 个非 RGB 模板） | 灰度 5 个工作日：0 丢图、0 无记录、日报每日到达 |
-| **第 3 周** | P1 服务端 1/2/3/4/6/7 ✅；客户端 9/10/11/12/13/14/15/16/17 ✅；18 的 open-folder ✅；员工手册、诊断包、预检脚本 ✅（2026-10-24 第二~六批） | 灰度反馈清零 |
+| **第 3 周** | P1 服务端 1/2/3/4/6/7 ✅；客户端 9/10/11/12/13/14/15/16/17 ✅；18 全项 ✅（含 `task_id` 白名单）；12 的 Job Object 兜底 ✅；员工手册、诊断包、预检脚本 ✅（2026-10-24 第二~七批）。仅剩服务端 5（多副本重复推日报）、8（Token 明文过 HTTP）待口径 | 灰度反馈清零 |
 | **第 4 周** | 全量分发（签名安装包 + 自动更新通道）；上线监控与备份演练 | 上线检查清单（DEPLOY 第四节）全打勾 + 演练记录归档 |
 
 **不建议**跳过灰度直接全量：P0-5 与 P0-6 的表现都是"客户端看着正常、数据没了"，全量后才发现就要挨台排查。

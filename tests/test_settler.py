@@ -359,3 +359,13 @@ def test_429_on_settle_keeps_the_record_in_the_offline_queue(data_dir, cfg):
     assert "429" in payload["upload_message"]
     item = queue.load(queue.pending()[0])
     assert item["blocked_reason"], "受阻原因要落盘，界面才能告诉员工在等什么"
+
+
+def test_settle_task_ignores_illegal_task_id(data_dir, cfg):
+    """结算入口也要挡：这个函数是路由与后台扫描共用的"""
+    assert settler.settle_task("../../x", lambda c: FakeClient(), cfg=cfg) is None
+
+
+def test_settle_task_ignores_illegal_task_id(data_dir, cfg):
+    """结算入口也要挡：这个函数是路由与后台扫描共用的"""
+    assert settler.settle_task("../../x", lambda c: FakeClient(), cfg=cfg) is None

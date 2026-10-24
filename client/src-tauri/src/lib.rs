@@ -34,6 +34,8 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, WebviewUrl, WebviewWindow,
 };
 
+mod win_job;
+
 /// 单实例通知端口（sidecar 用 8765，错开）
 const INSTANCE_PORT: &str = "127.0.0.1:48732";
 /// 首实例的监听器：run() 里绑定，setup() 里起接收线程
@@ -856,6 +858,11 @@ pub fn run() {
                 Some(mut cmd) => match cmd.spawn() {
                     Ok(child) => {
                         println!("sidecar 已启动，pid={}", child.id());
+                        // 入 job：Tauri 被强杀时由内核把 sidecar 与它后来的 worker
+                        // 一起收走。失败只警告——看门狗才是主路径，兜底不该拦启动。
+                        if let Err(e) = win_job::guard(&child) {
+                            eprintln!("sidecar 未能加入 job 对象（兜底降级为父进程看门狗）: {e}");
+                        }
                         Some(child)
                     }
                     Err(e) => {
@@ -1108,5 +1115,20 @@ mod parent_pid_tests {
         assert!(src.contains(&call), "resolve_sidecar 包装层漏了 pid 传递");
         let wrapper = format!("resolve_sidecar_raw({})?", "app");
         assert!(src.contains(&wrapper), "所有返回路径都要经过同一个包装函数");
+    }
+}
+
+// ==================== sidecar 必须入 job 对象 ====================
+// 父进程看门狗有最多 2 秒的反应窗口，而且 worker（孙进程）还是靠 sidecar 先死
+// 才被回收。Tauri 被 TerminateProcess 时，只有内核级的 job 能一次收干净。
+// 漏调 guard() 不会让任何逻辑测试变红——它只是悄悄少了一层兜底，所以用源码守卫盯。
+#[cfg(test)]
+mod child_job_tests {
+    #[test]
+    fn 启动_sidecar_之后必须把它放进_job() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let call = format!("\n                        if let Err(e) = {}(&child) {{\n", "win_job::guard");
+        assert!(src.contains(&call), "spawn 之后没有调 win_job::guard，强杀时兜底是空的");
+        assert!(src.contains("\nmod win_job;\n"), "模块没声明，guard 编译不进来");
     }
 }

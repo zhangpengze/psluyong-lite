@@ -420,3 +420,33 @@ def test_worker_is_told_to_watch_the_sidecar_not_tauri(tmp_path: Path, monkeypat
     ex.start(_make_params(tmp_path))
 
     assert seen["env"]["PSLUYONG_PARENT_PID"] == str(os.getpid())
+
+
+def test_status_treats_illegal_task_id_as_unknown():
+    """轮询一个非法 id 不能去拼路径，也不能崩：就当没有这个任务"""
+    ex = Executor()
+
+    status = ex.status("../../Windows/win.ini")
+
+    assert status == {"state": "unknown", "finished": True}
+
+
+def test_status_never_reads_outside_the_executions_dir(tmp_path, monkeypatch):
+    """把"能读到执行目录之外"做成可观测的：外面放一份看起来正常的终态
+
+    朴素拼路径的写法会落到 `executions/../secret/status.json`，于是返回
+    done/success——也就是"请求里的字符串决定读哪个文件"。这里要求它读不到。
+    """
+    import client.sidecar.config as config_mod
+
+    secret_dir = tmp_path / "secret"
+    secret_dir.mkdir()
+    (secret_dir / "status.json").write_text(
+        json.dumps({"state": "done", "success": True, "image_path": "x.jpg"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "app_data_dir", lambda: tmp_path)
+
+    status = Executor().status("../secret")
+
+    assert status == {"state": "unknown", "finished": True}

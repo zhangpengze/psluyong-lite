@@ -26,7 +26,7 @@ client/              Tauri 2 + Vue 3 员工客户端
   src/               Vue 界面
   src-tauri/         Rust 外壳
 bot/                 日报生成与推送（APScheduler + NapCat）、群内「汇总」指令回调
-tests/               870 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
+tests/               916 个用例，覆盖 API、权限、去重与失败重试回填、导出截断提示、
                      搜索通配符转义、图片内容校验、生成取消、
                      离线补传、路径穿越、CSRF、回收站、分页边界、审计日志、
                      登录限流、图片命名规则、数据库备份与图片镜像、
@@ -50,6 +50,8 @@ tests/               870 个用例，覆盖 API、权限、去重与失败重试
                      上传闸门（单来源+全站、限流先于读 body、429 不被当业务拒绝）、
                      日报正文长度上限（按字节按行截断/存档仍是全文）、
                      目录统计缓存（mtime 失效/过期重扫/容量上限）、
+                     task_id 白名单（路径穿越/Windows 保留设备名/幽灵失败记录）、
+                     Job Object 兜底（KILL_ON_JOB_CLOSE 读回/对照组/三态等待）、
                      员工手册与界面文案同步
 ```
 
@@ -129,7 +131,7 @@ npm run tauri:dev
 ### 3. 运行测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（870 个用例）
+.venv/Scripts/python.exe -m pytest tests -q      # 后端 + sidecar（916 个用例）
 cd client && npm run typecheck && npm test      # 前端类型检查与单测
 ```
 
@@ -144,7 +146,7 @@ npm run typecheck   # vue-tsc 类型检查（npm run build 会先跑一遍）
 Rust 外壳（CI 里没有 Rust 工具链，本地改 `src-tauri` 后请手动跑）：
 
 ```bash
-cd client/src-tauri && cargo test --lib          # 13 个：贴边方向/多屏/单实例/父进程 pid
+cd client/src-tauri && cargo test --lib          # 18 个：贴边方向/多屏/单实例/父进程 pid/job 兜底
 ```
 
 ## 生成链路
@@ -217,6 +219,9 @@ cd client/src-tauri && cargo test --lib          # 13 个：贴边方向/多屏/
 | 上传接口可以被无限次调用 | 每来源 30 次/分 + 全站 300 次/分两道闸（`upload_guard`），**在解析请求体之前**挡住 | 一条记录能带 64MB 图：一个写错的循环、一个被捡到的 API Key、一段重放旧请求的脚本，几分钟就能把 NAS 写满。做成装饰器而不是视图第一行，"先限流后读 body"是结构性保证；返回 429 而不是 400，因为 sidecar 队列只删 400/409/422——限流一次就丢一条记录 |
 | 日报正文超长，整条被群拒发 | 发送前按**字节**、按**行**截到 4000 以内并注明"已省略 N 行，完整版见后台"；存档的 `.md` 仍是全文 | 伙伴数 × 模板名（200 字符）轻易过万字符，OneBot 对超长文本是整条拒发（retcode 100）。最忙的那天（数据最多、最该报出去）群里反而一条消息都没有。按字节是因为一个汉字 3 字节——按字符数判断会以为还很空 |
 | 仪表盘每 30 秒全量遍历图片目录 | `dir_usage` 按**目录层**缓存（mtime 失效 + 5 分钟 TTL + 容量上限），合计每次用缓存的分层结果重算 | 几万张图就是几万次 stat，而且全是重复劳动：图片按 年/月/日 分层、文件名是 uuid，写进去就不再变。只缓存"子树合计"的话，孙目录里删一个文件上层会一直报旧值 |
+| `task_id` 是请求里带过来的串，直接拼进路径 | 白名单正则（字母数字开头、只许 `-_`、最长 64）＋ Windows 保留设备名（`CON`/`NUL`/`COM1`…）拒绝；三个入口（接口、执行器 fallback、结算）共用一个 `task_paths.task_dir()` | 单机桌面场景危害有限，但 `..\..\x` 这类串能把 status 读取带到 `executions/` 之外。顺带查出一个真 bug：执行器对没见过的 id 会编一个 `unknown`+`finished` 状态，路由当成终态去结算 → 后台落一条**幽灵失败记录**（成功率被扣，而那条"失败"根本没人做过）。没这个任务目录就不结算 |
+| Tauri 被强杀时，worker 里的 PS COM 调用没人收拾 | Job Object 兜底（`win_job.rs`）：sidecar 入 job 后再起 worker，`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 由内核在句柄关闭时把整棵树收走；句柄**故意不关** | 父进程看门狗有最多 2 秒窗口，且孙进程仍靠 sidecar 先死才回收。任务管理器结束进程、安装器强杀这类 `TerminateProcess` 下，Python 代码一行都执行不到。失败只记日志不拦启动——兜底不该让客户端起不来。只能管"入 job 之后"生出来的子进程，所以顺序是 sidecar 先入、worker 后起 |
+| job 用例「关句柄会杀掉子进程」一直是假绿 | 三处修正：`wait_exit` 申请 `SYNCHRONIZE` 并返回三态（已退出/仍在跑/**不知道**）；每次关句柄前先断言"子进程还活着"；再补一条 `LimitFlags=0` 的对照组必须活下来 | 原来的 `WaitForSingleObject` 少了 `SYNCHRONIZE`，每次都返回 `WAIT_FAILED`，被当成"已退出"——所以 `LimitFlags` 改成 0 用例照样全过（变异验证时才发现）。这类"守卫本身失效"比缺守卫更危险：它看起来一直都在盯着 |
 
 ## 部署
 

@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request
 
 from core.runner import DEFAULT_FILENAME_RULE, FILENAME_RULES  # noqa: E402
 
-from . import settler
+from . import settler, task_paths
 from .api_client import ServerError
 from .config import app_data_dir, load_config
 from .executor import BusyError
@@ -31,7 +31,10 @@ SETTLE_WAIT_S = 5.0
 
 def _wait_settled(task_id: str, timeout_s: float = SETTLE_WAIT_S) -> dict | None:
     """等另一个线程把 result.json 写出来（很短，正常几十毫秒）"""
-    path = app_data_dir() / "executions" / task_id / "result.json"
+    task_dir = task_paths.task_dir(app_data_dir(), task_id)
+    if task_dir is None:
+        return None
+    path = task_dir / "result.json"
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         cached = read_json(path)
@@ -104,6 +107,10 @@ def register_export_routes(app: Flask, executor, _client) -> None:
         task_id = str(request.args.get("task_id") or "").strip()
         if not task_id:
             return jsonify({"ok": False, "error": "缺少 task_id"}), 400
+        if not task_paths.is_valid(task_id):
+            # 400 而不是 404：这个 id 永远不可能是我们发的，说清是参数问题
+            logger.warning("拒绝非法的 task_id（轮询）: %r", task_id)
+            return jsonify({"ok": False, "error": task_paths.reject_message()}), 400
 
         status = executor.status(task_id)
         if not status.get("finished"):
@@ -136,6 +143,11 @@ def register_export_routes(app: Flask, executor, _client) -> None:
             task_id = executor.running_task() or ""
         if not task_id:
             return jsonify({"ok": False, "error": "当前没有正在生成的任务"}), 200
+        if not task_paths.is_valid(task_id):
+            # 不带 task_id 时取的是 executor 自己记的 id（必然合法），
+            # 能走到这里的只有前端传上来的串
+            logger.warning("拒绝非法的 task_id（取消）: %r", task_id)
+            return jsonify({"ok": False, "error": task_paths.reject_message()}), 400
 
         ok, message = executor.cancel(task_id)
         return jsonify({"ok": ok, "task_id": task_id, "error": None if ok else message, "message": message}), 200

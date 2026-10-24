@@ -23,7 +23,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import parent_watch
+from . import parent_watch, task_paths
 from .timeout import HARD_TIMEOUT_S, should_abort, timeout_final  # noqa: F401
 from .worker import read_json, write_json_atomic
 
@@ -101,9 +101,12 @@ class Executor:
             # 落入"未成功"分支报"生成失败"：图已经生出来了、记录却没上报，
             # 员工白干一次。真实 race：worker 退出后 reaper（5s 巡查）
             # 先于客户端轮询（1s 间隔）释放任务，客户端就收到假失败。
+            # 路径一律经 task_paths 拼：非法 id 直接当"没有这个任务"，
+            # 绝不让请求里的字符串跳到 executions/ 之外。
             from .config import app_data_dir
 
-            final = read_json(app_data_dir() / "executions" / task_id / "status.json")
+            fallback_dir = task_paths.task_dir(app_data_dir(), task_id)
+            final = read_json(fallback_dir / "status.json") if fallback_dir else None
             if final is not None:
                 return _map_final(final)
             return {"state": "unknown", "finished": True}

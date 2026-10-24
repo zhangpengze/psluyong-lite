@@ -26,6 +26,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import task_paths
 from .config import app_data_dir, load_config
 from .ps_info import _resolve_ps
 from .reporter import record_fields, submit_fields
@@ -143,7 +144,17 @@ def settle_task(task_id: str, client_factory, status: dict | None = None, cfg=No
           别的线程正在结算 -> None
           worker 结束但记录没落地 -> 带 unsettled=True 的负载（不缓存）
     """
-    task_dir = app_data_dir() / "executions" / task_id
+    task_dir = task_paths.task_dir(app_data_dir(), task_id)
+    if task_dir is None:
+        # 请求带来的 id 不合法：既不存在也不能读，别去拼一条能跑出 executions/ 的路径
+        logger.warning("结算收到非法 task_id，已忽略: %r", task_id)
+        return None
+    if not task_dir.exists():
+        # 没有这个任务目录 = 这条 id 指向的任务从来没跑过（或早被清理）。
+        # 此时调用方可能塞进来一个 executor 编的 "unknown" 状态，拿它结算会提交
+        # 一条**幽灵失败记录**：成功率被扣分，而后台看到的那条失败根本没人做过。
+        logger.info("结算忽略不存在的任务: %s", task_id)
+        return None
     cached = read_json(task_dir / "result.json")
     if cached is not None:
         return cached

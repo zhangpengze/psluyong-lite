@@ -18,6 +18,17 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Job Object 兜底（src/win_job.rs）：Tauri 被强杀时由内核把 sidecar 与 worker
+# 一起收走。只在这个目标平台编译，不影响其他构建。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = true

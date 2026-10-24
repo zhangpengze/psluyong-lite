@@ -28,9 +28,14 @@ export async function setMainAlwaysOnTop(on: boolean): Promise<void> {
   await tg()?.core.invoke('set_main_always_on_top', { on })
 }
 
-/** 主窗贴边开关：空串 = 取消贴边。设置页改方向也走这里 */
+/** 主窗贴边开关：空串 = 取消贴边（方向由 Rust 按"离哪条屏缘近"决定） */
 export async function setMainDock(side: DockSide): Promise<void> {
   await tg()?.core.invoke('set_main_dock', { side })
+}
+
+/** 主窗贴到"离得最近的那一条屏缘"：贴哪边不让人选，跟 QQ 隐藏一样由距离决定 */
+export async function dockMainNearest(): Promise<void> {
+  await tg()?.core.invoke('dock_main_nearest')
 }
 
 /** 拖拽稳定后的自动贴边判定（Rust 里判 24px 边缘距离） */
@@ -46,6 +51,14 @@ export async function openWindow(kind: 'history' | 'settings', x = -1, y = -1): 
 /** 隐藏主窗（Esc 用；托盘显隐走 Rust 自己处理） */
 export async function hideMainWindow(): Promise<void> {
   await tg()?.core.invoke('hide_main_window')
+}
+
+/**
+ * 主窗高度自适应：宽度不变，只改高（逻辑像素）。
+ * 内容比窗口矮就缩，比窗口高就长——迷你窗不该留一大片死白。
+ */
+export async function setMainHeight(height: number): Promise<void> {
+  await tg()?.core.invoke('set_main_height', { height })
 }
 
 /** 关闭主窗是否入托盘（设置页开关，同步给 Rust） */

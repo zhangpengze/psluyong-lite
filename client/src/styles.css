@@ -312,15 +312,24 @@ a {
   flex: 1 0 auto;
 }
 
-/* 空闲速查条：仅前 3 次启动显示的一行小字，不占视觉重量 */
-.tips {
-  padding: 1px 2px;
-  color: var(--faint);
-  font-size: 10.5px;
-  line-height: 1.6;
+/* 主窗表单：顶部对齐，不留死白。
+   高度不再靠"居中"去平衡——窗口本身会按内容长高/缩短（App.vue 的
+   autoFit + Rust 的 set_main_height），所以这里只要老老实实从顶部排。
+   曾经用 margin:auto 做垂直居中，结果是 380 高窗口里上下各空 70px 的
+   纯死区，看着像没画完；居中只是在骗自己"留白是排版"。 */
+.form-body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.tips kbd {
-  margin: 0 1px;
+
+/* 操作区：字段在上、主按钮在下，用一个略大的间隔把"填写"和"提交"分开。 */
+.form-foot {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 /* ============ 表单平铺控件（v3：标签入框，无卡片包装）============ */
@@ -421,7 +430,7 @@ textarea {
   width: 100%;
   font: inherit;
   font-size: 12.5px;
-  padding: 7px 9px;
+  padding: 6px 9px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--fill);
@@ -540,9 +549,49 @@ textarea::placeholder {
   filter: brightness(0.96);
 }
 .btn:disabled {
-  opacity: 0.55;
+  /* 只降透明度会让主按钮看起来"还亮着"，员工会反复点一个不会有反应的按钮。
+     换成描边 + 低饱和底 + 灰字，一眼就知道现在不能点。 */
+  background: var(--fill);
+  border-color: var(--border);
+  color: var(--faint);
+  opacity: 1;
   cursor: not-allowed;
   box-shadow: none;
+}
+.btn:disabled kbd {
+  opacity: 0.4;
+}
+/* 等太久时主按钮变「取消生成」：红描边而不是实心红——
+   实心红看着像"确认执行危险操作"，这里只是给员工一个脱身出口 */
+.btn.btn-cancel {
+  background: var(--err-soft);
+  border-color: var(--err);
+  color: var(--err);
+  box-shadow: none;
+  font-weight: 600;
+}
+.btn.btn-cancel .btn-fill {
+  background: rgba(248, 113, 113, 0.16);
+}
+.btn.btn-cancel:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+/* 取消请求已发出、正在等进程退出：这时候才真的不能点 */
+.btn.btn-cancel:disabled {
+  background: var(--fill);
+  border-color: var(--border);
+  color: var(--faint);
+}
+/* 配置没配完时主按钮变「去配置：姓名 · API Key」。
+   和取消一样走描边语言（"换语义了"而非"更危险了"），
+   但用警示色区分：琥珀 = 去设置补齐，红 = 中断生成。
+   这一版替代了原来顶部那条黄横幅，占位从一行变成零。 */
+.btn.btn-setup {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 65%, transparent);
+  color: var(--warn);
+  box-shadow: none;
+  font-weight: 600;
 }
 .btn.ghost {
   background: var(--fill);
@@ -657,38 +706,8 @@ kbd {
   color: #3d2a05;
 }
 
-/* 配置缺失提示：单行条，只列缺的项 */
-.setup-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  font-size: 11.5px;
-  background: var(--warn-soft);
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  animation: rise 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.setup-strip .ss-ico {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  background: var(--warn);
-  color: #3d2a05;
-  font-weight: 700;
-  font-size: 11px;
-}
-.setup-strip .ss-text {
-  flex: 1;
-  min-width: 0;
-  color: var(--warn);
-}
-.setup-strip .ss-text b {
-  font-weight: 700;
-}
+/* 配置缺失提示已并入主按钮（.btn-setup）：不再单独占一条横幅。
+   首启引导长在"现在该点的那一下"上，窗口因此少一行约 40px。 */
 
 /* ============ 生成中：一行关键警告 ============ */
 .busy-line {
@@ -826,29 +845,41 @@ kbd {
 /* ============ 历史列表 ============ */
 /* 主窗不再内嵌历史列表（记录改成独立窗口，样式见文件末尾「记录窗」） */
 
-/* 日期分组头 */
+/* 日期分组：现在是表内的一行分隔（以前每组自带一个卡片和一套表头）。
+   分组标题保留，因为它承担"今天/昨天"的时间锚点，切掉就分不清批次。
+   改成 <button> 是为了能点一下"只看这天"——它本来就是员工找某天记录时
+   最想点的那一行，只当标题太浪费。 */
 .date-group {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  width: 100%;
+  font: inherit;
+  font-size: 10.5px;
   font-weight: 700;
+  text-align: left;
   color: var(--faint);
-  margin: 10px 2px 2px;
+  padding: 4px 12px;
+  background: var(--fill);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
 }
-.date-group:first-child {
-  margin-top: 0;
+.date-group:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+/* 已按这天筛选：明确标出来，再点一次就取消 */
+.date-group.picked {
+  color: var(--primary);
+  background: var(--primary-soft);
 }
 .date-group .dg-count {
   font-weight: 400;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
-}
-.date-group::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--border);
+  margin-left: auto;
 }
 
 /* 搜索框 */
@@ -909,39 +940,6 @@ kbd {
   }
 }
 
-/* 历史统计行 */
-.stats-row {
-  display: flex;
-  gap: 7px;
-  margin-bottom: 9px;
-}
-.stat-pill {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 10px;
-  border-radius: 9px;
-  background: var(--fill);
-  border: 1px solid var(--border);
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-.stat-pill .sp-label {
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.stat-pill .sp-value {
-  font-size: 16px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-  margin-left: auto;
-}
-.stat-pill.accent .sp-value {
-  color: var(--primary);
-}
-
 /* 时间范围切换（近 7 天 / 近 30 天 / 全部） */
 .range-row {
   display: flex;
@@ -974,6 +972,78 @@ kbd {
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* 自定义日期区间：常驻的两个原生 date 输入。
+   原生控件在深色主题下默认是白底黑字，靠 :root 的 color-scheme 让它跟着变；
+   这里只把盒子做成和 .range-chip 同一套胶囊，免得一行里两种语汇。 */
+.dlabel {
+  font-size: 10.5px;
+  color: var(--faint);
+  font-weight: 700;
+  margin-left: 3px;
+}
+.date-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px 1px 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--fill);
+  transition: border-color 0.15s, background 0.15s;
+}
+.date-pick.active {
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+  background: var(--primary-soft);
+}
+.dchip {
+  width: 101px;
+  padding: 2px 2px 2px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.dchip:hover {
+  color: var(--text);
+}
+.dchip:focus {
+  outline: none;
+  color: var(--text);
+}
+/* 原生日历图标压小一点，否则比 chip 还高 */
+.dchip::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  cursor: pointer;
+  width: 11px;
+  height: 11px;
+  margin-left: -2px;
+}
+.dchip::-webkit-calendar-picker-indicator:hover {
+  opacity: 0.9;
+}
+.date-pick .dash {
+  font-size: 10px;
+  color: var(--faint);
+}
+.date-pick .dclear {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.date-pick .dclear:hover {
+  color: var(--text);
+  background: var(--surface-hover);
 }
 
 /* 骨架屏 */
@@ -1313,6 +1383,128 @@ kbd {
 }
 
 /* ============ 设置页专用 ============ */
+/* 分组标签：一次只显示一组。原来 5 张卡片 + 一个折叠区平铺下来 1920px，
+   700px 的窗口要滚 2.75 屏；分组后每组都在一屏内，不用再滚。 */
+.set-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--fill);
+}
+.set-tabs button {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 4px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s;
+}
+.set-tabs button:hover {
+  color: var(--text);
+}
+.set-tabs button.active {
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow-soft);
+}
+/* 模板数量挂在标签上：不点进去也知道有几个模板 */
+.set-tabs .tab-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--fill-strong);
+}
+.set-tabs button.active .tab-badge {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+/* 卡片撑满窗口：设置窗里各组内容长短不一（账号 270、高级 403），
+   卡片不撑开的话短的那几组下面会吊着一大片空。撑开之后留白落在卡片里面，
+   读起来是"一页设置"，而不是"一张小卡片浮在窗口上"。 */
+.set > .card {
+  flex: 1 0 auto;
+}
+
+/* 一行胶囊型单选（图片命名 / 贴边方向）：替掉原来一排 55px 高的卡片式单选 */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.hint .mono {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Photoshop 自动识别结果：一行状态 + 路径 + 重新识别按钮。
+   路径可能很长（D:\Program Files\Adobe\Adobe Photoshop CS6 (64 Bit)\Photoshop.exe），
+   所以单独一行并允许换行折断，不撑宽设置窗。 */
+.ps-detect {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--fill);
+}
+.ps-detect.bad {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.ps-detect .pd-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.ps-detect .pd-line b {
+  font-size: 12px;
+}
+.ps-detect .pd-ico {
+  flex: 0 0 auto;
+}
+.ps-detect .pd-ico.ok {
+  color: var(--ok);
+}
+.ps-detect .pd-ico.no {
+  color: var(--warn);
+}
+.ps-detect .pd-ver {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ps-detect .pd-line .range-chip {
+  margin-left: auto;
+}
+.ps-detect .pd-path {
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+.ps-detect .hint {
+  margin-top: 5px;
+}
+
 .dropzone {
   border: 1.5px dashed var(--border-strong);
   border-radius: 10px;
@@ -1377,6 +1569,49 @@ kbd {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   flex: 0 0 auto;
+}
+
+.tpl-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+/* 「打开模板目录」降级成文字链接：它是排查问题时才用的次要动作，
+   占一整行大按钮会把「上传」这个主操作的权重抢走 */
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-size: 11.5px;
+}
+
+/* 删除按钮：默认隐形，悬停/键盘聚焦才出现。
+   三个模板挂三个红框按钮，视觉噪声会盖过模板名本身——而删除是低频操作。 */
+.tpl-del {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.tpl-row:hover .tpl-del,
+.tpl-del:focus-visible {
+  opacity: 1;
+}
+.tpl-del:hover {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
 }
 
 /* 开关 */
@@ -1488,108 +1723,7 @@ kbd {
   background: var(--surface-hover);
 }
 
-/* 高级设置折叠区 */
-.adv {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  overflow: hidden;
-}
-.adv > summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 9px 12px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  user-select: none;
-}
-.adv > summary::-webkit-details-marker {
-  display: none;
-}
-.adv > summary:hover {
-  color: var(--text);
-}
-.adv > summary .adv-arrow {
-  margin-left: auto;
-  transition: transform 0.18s ease;
-  display: grid;
-  place-items: center;
-}
-.adv[open] > summary .adv-arrow {
-  transform: rotate(180deg);
-}
-.adv-body {
-  padding: 2px 12px 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
-}
-
-/* 设置页底部保存栏 */
-.save-bar {
-  position: sticky;
-  bottom: -12px;
-  margin: 2px -12px -12px;
-  padding: 9px 12px;
-  background: var(--surface-solid);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-/* 单选列表（图片命名等二选一设置） */
-.opt-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.opt-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--fill);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-.opt-row:hover {
-  border-color: var(--border-strong);
-}
-.opt-row.active {
-  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
-  background: var(--primary-soft);
-}
-.opt-row input[type='radio'] {
-  accent-color: var(--primary);
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  flex: 0 0 auto;
-}
-.opt-row .opt-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.opt-row .opt-name {
-  font-size: 12.5px;
-  color: var(--text);
-}
-.opt-row .opt-sample {
-  font-size: 11px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 版本与诊断脚注（设置页最底部，紧贴保存栏上方） */
+/* 版本与诊断脚注（高级分组底部） */
 .diag-row {
   display: flex;
   align-items: center;
@@ -1598,11 +1732,31 @@ kbd {
   font-size: 11px;
   color: var(--muted);
 }
+.card > .diag-row {
+  margin: 12px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
 .diag-row .diag-ver {
   font-variant-numeric: tabular-nums;
 }
 .diag-row .link {
   font-size: 11px;
+}
+/* 设置页底部保存栏：只在有未保存改动时渲染（见 SettingsPanel 的 v-if="dirty"），
+   所以不需要"已保存"的灰态，也不需要常驻占位。 */
+.save-bar {
+  position: sticky;
+  bottom: -12px;
+  flex: 0 0 auto;
+  margin: 0 -12px -12px;
+  padding: 9px 12px;
+  background: var(--surface-solid);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  animation: rise 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 .save-bar .sb-hint {
   flex: 1;
@@ -1620,10 +1774,6 @@ kbd {
   background: var(--warn);
   flex: 0 0 auto;
   animation: pulse 1.6s ease infinite;
-}
-.save-bar .sb-dot.saved {
-  background: var(--ok);
-  animation: none;
 }
 @keyframes pulse {
   0%,
@@ -1715,25 +1865,33 @@ kbd {
   color: var(--text);
 }
 
-/* 表格卡片：表头 + 数据行共用一套列宽，靠 grid 对齐 */
+/* 表格卡片：表头 + 数据行共用一套列宽，靠 grid 对齐。
+   overflow:clip 而不是 hidden —— hidden 会把祖先变成滚动容器，sticky 表头就
+   失效了；clip 只裁角圆、不影响 sticky 相对 .body 吸顶。 */
 .rec-card {
   padding: 0;
-  overflow: hidden;
+  overflow: clip;
 }
 .rec-head,
 .rec-main {
   display: grid;
-  grid-template-columns: 72px minmax(160px, 1fr) 132px 104px 46px 46px 54px;
+  /* 时间列 104px：从「10-23 14:22」改成「2026-10-23 14:22」要 16 个字符，
+     窄了就会换行或者被省略号切掉年份——那正是要修的问题 */
+  grid-template-columns: 104px minmax(170px, 1fr) 68px 100px 80px 46px 46px 54px;
   align-items: center;
   gap: 10px;
 }
 .rec-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: 6px 12px;
   font-size: 10.5px;
   font-weight: 700;
   color: var(--faint);
   letter-spacing: 0.3px;
-  background: var(--fill);
+  /* 吸顶要不透明：半透明底会把下面滚过去的行透出来 */
+  background: var(--surface-solid);
   border-bottom: 1px solid var(--border);
 }
 .rec-row {
@@ -1751,7 +1909,7 @@ kbd {
   min-height: 46px;
 }
 .rec-time {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1812,6 +1970,10 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 作者 / 模板 / 合作伙伴三列同一套省略规则：宽度固定，超了打点，悬停看全名。
+   三列都用次要色——标题才是这张表的主键，作者只是用来定位"这是谁的单"，
+   给它加粗反而会把标题压下去。 */
+.rec-author,
 .rec-tpl,
 .rec-pt {
   font-size: 11.5px;
@@ -1847,8 +2009,16 @@ kbd {
   display: flex;
   justify-content: flex-end;
 }
+/* 「复制名」平时隐形，行悬停/键盘聚焦才出现：
+   13 行挂 13 个蓝链接，视觉噪声盖过标题本身，而复制文件名是低频动作。 */
 .rec-act .link {
   font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.rec-row:hover .rec-act .link,
+.rec-act .link:focus-visible {
+  opacity: 1;
 }
 .rec-foot {
   display: flex;
@@ -1860,24 +2030,22 @@ kbd {
 }
 
 /* 记录窗窄到一定程度：先让出「合作伙伴」，再让出「模板」，
-   标题列始终保留，宁少列不挤成省略号墙 */
+   标题和作者始终保留——标题是主键，作者是主检索维度，宁少列不挤成省略号墙 */
 @media (max-width: 780px) {
   .rec-head,
   .rec-main {
-    grid-template-columns: 68px minmax(140px, 1fr) 100px 46px 46px 50px;
+    grid-template-columns: 104px minmax(140px, 1fr) 64px 92px 46px 46px 50px;
   }
-  .rec-head > :nth-child(4),
-  .rec-main > .rec-pt {
+  .rec-pt {
     display: none;
   }
 }
 @media (max-width: 640px) {
   .rec-head,
   .rec-main {
-    grid-template-columns: 64px minmax(120px, 1fr) 46px 46px 48px;
+    grid-template-columns: 104px minmax(120px, 1fr) 60px 46px 46px 48px;
   }
-  .rec-head > :nth-child(3),
-  .rec-main > .rec-tpl {
+  .rec-tpl {
     display: none;
   }
 }

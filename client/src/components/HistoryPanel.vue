@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, type ClientConfig, type HistoryItem, type TemplateItem } from '../api/sidecar'
+import {
+  api,
+  type ClientConfig,
+  type HistoryItem,
+  type HistoryRange,
+  type TemplateItem,
+} from '../api/sidecar'
 import { formatTime, groupByDate, localDateKey } from '../utils/history'
 import { useToast } from '../composables/useToast'
 import { copyText } from '../utils/clipboard'
@@ -23,18 +29,39 @@ const refreshing = ref(false)
 const error = ref('')
 const keyword = ref('')
 const viewing = ref<HistoryItem | null>(null)
-/** 时间范围：服务端默认只给近 7 天，必须显式声明区间；记录窗默认全部 */
-type Range = '7' | '30' | 'all'
-const RANGES: { key: Range; label: string }[] = [
+
+/** 快捷区间档位（不含 custom：只要员工动了日期框，就自动变成自定义区间） */
+type QuickRange = Exclude<HistoryRange, 'custom'>
+const RANGES: { key: QuickRange; label: string }[] = [
+  { key: 'today', label: '今天' },
   { key: '7', label: '近 7 天' },
   { key: '30', label: '近 30 天' },
   { key: 'all', label: '全部' },
 ]
 const RANGE_KEY = 'psluyong-lite.history-range'
-const range = ref<Range>((localStorage.getItem(RANGE_KEY) as Range) || 'all')
+const DATES_KEY = 'psluyong-lite.history-dates'
+const range = ref<QuickRange>((localStorage.getItem(RANGE_KEY) as QuickRange) || 'all')
+
+/** 自定义起止日期（YYYY-MM-DD，与 <input type="date"> 的 value 一致） */
+function loadDates(): [string, string] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DATES_KEY) || '{}') as { start?: string; end?: string }
+    return [raw.start || '', raw.end || '']
+  } catch {
+    return ['', '']
+  }
+}
+const [initStart, initEnd] = loadDates()
+const dStart = ref(initStart)
+const dEnd = ref(initEnd)
+/** 任一头有日期 = 自定义区间（快捷档位让位，chip 全部变灰） */
+const custom = computed(() => !!(dStart.value || dEnd.value))
+
 /** 服务端命中的总条数：可能大于本页拉回的条数（条数上限） */
 const total = ref(0)
-const rangeLabel = computed(() => RANGES.find((r) => r.key === range.value)?.label ?? '近 7 天')
+/** 服务端回显的"真正生效"区间：只填起始日时它会补上结束日，界面照它显示 */
+const spanStart = ref('')
+const spanEnd = ref('')
 
 // 筛选：模板 / 合作伙伴 / 状态（在已拉回的条目里过滤，选项从数据里长出来）
 const fTemplate = ref('')
@@ -47,6 +74,11 @@ const partnerOptions = computed(() => [...new Set(items.value.map((it) => it.par
 const todayStr = computed(() => localDateKey(new Date()))
 
 const todayCount = computed(() => items.value.filter((it) => it.work_date === todayStr.value).length)
+
+/** 当前区间是否包含今天：不含就别在标题后面挂「今日 0」，那会被读成"今天一条都没生成" */
+const includesToday = computed(
+  () => !spanStart.value || !spanEnd.value || (spanStart.value <= todayStr.value && todayStr.value <= spanEnd.value),
+)
 
 const displayItems = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -72,9 +104,13 @@ async function load(silent = false) {
   }
   error.value = ''
   try {
-    const res = await api.history(range.value)
+    const res = custom.value
+      ? await api.history('custom', dStart.value, dEnd.value)
+      : await api.history(range.value)
     items.value = res.items ?? []
     total.value = res.total ?? items.value.length
+    spanStart.value = res.start || ''
+    spanEnd.value = res.end || ''
     if (!res.ok) error.value = res.error || '加载失败'
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
@@ -90,7 +126,7 @@ function reload() {
 }
 
 // 回调形式调用 load()：直接把 load 交给 watch 会把 (newVal, oldVal) 当 silent 传进去
-watch([() => props.version, range], () => load())
+watch([() => props.version, range, dStart, dEnd], () => load())
 watch(range, (r) => {
   try {
     localStorage.setItem(RANGE_KEY, r)
@@ -98,23 +134,76 @@ watch(range, (r) => {
     /* 存储不可用仅本次会话记住 */
   }
 })
+watch([dStart, dEnd], ([s, e]) => {
+  try {
+    localStorage.setItem(DATES_KEY, JSON.stringify({ start: s, end: e }))
+  } catch {
+    /* 同上 */
+  }
+})
 watch([items, todayCount], () => emit('stats', { total: items.value.length, today: todayCount.value }))
+
+/** 点快捷档位 = 放弃自定义日期（否则 chip 显示"近 7 天"但实际查的是别的区间） */
+function pickQuick(key: QuickRange) {
+  dStart.value = ''
+  dEnd.value = ''
+  range.value = key
+}
+
+function clearDates() {
+  dStart.value = ''
+  dEnd.value = ''
+}
+
+/** 是否正只看这一天 */
+function isPickedDay(key: string): boolean {
+  return dStart.value === key && dEnd.value === key
+}
+
+/** 点日期分组标题 = 只看这天；再点一次取消（比手打日期快得多） */
+function toggleDay(key: string) {
+  if (isPickedDay(key)) {
+    clearDates()
+  } else {
+    dStart.value = key
+    dEnd.value = key
+  }
+}
+
+function clearAllFilters() {
+  keyword.value = ''
+  fTemplate.value = ''
+  fPartner.value = ''
+  fStatus.value = ''
+  clearDates()
+}
 
 function fmt(iso: string): string {
   return formatTime(iso)
 }
 
-/** 列表行里的短时间：MM-DD HH:mm */
+/** 列表行里的时间：带年（YYYY-MM-DD HH:mm），跨年也不会有歧义 */
 function fmtShort(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  return formatTime(iso)
 }
 
 function ms(processingMs?: number): string {
   return processingMs ? `${(processingMs / 1000).toFixed(1)}s` : '—'
 }
+
+/** 筛选行右侧那行小字：区间 + 总数 + 今日，被关键词/下拉筛掉时再补一句"显示 N 条" */
+const summary = computed(() => {
+  const parts: string[] = []
+  // 自定义区间才回显生效跨度：只填起始日时服务端会补一个结束日，不显示就对不上
+  if (custom.value && spanStart.value && spanEnd.value) {
+    parts.push(spanStart.value === spanEnd.value ? spanStart.value : `${spanStart.value} ~ ${spanEnd.value}`)
+  }
+  parts.push(`共 ${total.value} 条`)
+  if (includesToday.value) parts.push(`今日 ${todayCount.value}`)
+  if (displayItems.value.length !== items.value.length) parts.push(`显示 ${displayItems.value.length} 条`)
+  else if (total.value > items.value.length) parts.push(`只显示最近 ${items.value.length} 条`)
+  return parts.join(' · ')
+})
 
 /** 日期分组：今天 / 昨天 / 具体日期，组内保持服务端返回顺序 */
 const groups = computed(() => groupByDate(displayItems.value))
@@ -148,31 +237,49 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
 
 <template>
   <div class="rec">
-    <!-- 统计：范围条数 + 今日 -->
-    <div class="stats-row">
-      <div class="stat-pill">
-        <span class="sp-label">{{ rangeLabel }}</span>
-        <span class="sp-value">{{ total }}</span>
-      </div>
-      <div class="stat-pill accent">
-        <span class="sp-label">今日生成</span>
-        <span class="sp-value">{{ todayCount }}</span>
-      </div>
-    </div>
-
-    <!-- 工具行：区间 + 搜索 + 刷新 -->
+    <!-- 工具行：区间 + 自定义日期 + 条数 + 搜索 + 刷新挤在一行。
+         原来这里还有一条独立的「统计带」（全部记录 / 今日生成两块大胶囊），
+         它说的和筛选行右边的「显示 N 条」是同一件事，白占 40px 高度，已合并成
+         区间后面那行小字。
+         日期框常驻而不是收进弹层：员工抱怨的正是"想按日期看却没有入口"，
+         藏起来等于没做。 -->
     <div class="rec-tools">
       <div class="range-row">
         <button
           v-for="r in RANGES"
           :key="r.key"
           class="range-chip"
-          :class="{ active: range === r.key }"
-          @click="range = r.key"
+          :class="{ active: !custom && range === r.key }"
+          @click="pickQuick(r.key)"
         >
           {{ r.label }}
         </button>
-        <span v-if="total > items.length" class="range-more">共 {{ total }} 条 · 显示最近 {{ items.length }} 条</span>
+        <span class="dlabel">日期</span>
+        <span class="date-pick" :class="{ active: custom }">
+          <input
+            v-model="dStart"
+            class="dchip"
+            type="date"
+            :max="todayStr"
+            title="起始日期（含当天）"
+            aria-label="起始日期"
+          />
+          <span class="dash">~</span>
+          <input
+            v-model="dEnd"
+            class="dchip"
+            type="date"
+            :max="todayStr"
+            title="结束日期（含当天）"
+            aria-label="结束日期"
+          />
+          <button v-if="custom" class="dclear" title="清掉日期，回到快捷区间" aria-label="清掉日期" @click="clearDates">
+            <svg viewBox="0 0 16 16" width="9" height="9">
+              <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              <line x1="12.5" y1="3.5" x2="3.5" y2="12.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+        </span>
       </div>
       <div class="search">
         <span class="s-ico">
@@ -181,7 +288,13 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
             <line x1="10.2" y1="10.2" x2="13.6" y2="13.6" />
           </svg>
         </span>
-        <input v-model="keyword" type="text" placeholder="搜索作者 / 标题 / 模板 / 合作伙伴" spellcheck="false" />
+        <input
+          v-model="keyword"
+          type="text"
+          placeholder="搜索作者 / 标题 / 模板"
+          title="作者、标题、模板、合作伙伴都能搜"
+          spellcheck="false"
+        />
         <button v-if="keyword" class="s-clear" title="清空搜索" aria-label="清空搜索" @click="keyword = ''">
           <svg viewBox="0 0 16 16" width="10" height="10">
             <line x1="3.5" y1="3.5" x2="12.5" y2="12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -221,7 +334,9 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
         <option value="failed">失败</option>
       </select>
       <span class="spacer" />
-      <span class="rf-count">显示 {{ displayItems.length }} 条</span>
+      <!-- 计数挂在筛选行右侧而不是区间行：区间行要塞 4 个档位 + 两个日期框 + 搜索，
+          再放一段「共 N 条 · 今日 M」就会把搜索框挤到第二行（真实踩过）。 -->
+      <span class="rf-count">{{ summary }}</span>
     </div>
 
     <!-- 骨架屏：避免"正在加载…"白屏感 -->
@@ -265,7 +380,7 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
       <span class="e-main">还没有录用记录</span>
       <span class="e-sub">
         回到主窗口，选模板、填作者和标题，点生成。记录会自动出现在这里。
-        <template v-if="range !== 'all'">更早的记录可切到「全部」查看。</template>
+        <template v-if="custom || range !== 'all'">换个时间区间，或点「全部」看更早的记录。</template>
       </span>
     </div>
 
@@ -278,19 +393,34 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
       </span>
       <span class="e-main">没有匹配的记录</span>
       <span class="e-sub">换个关键词，或清掉上面的筛选条件试试。</span>
-      <button class="btn ghost sm" @click="keyword = ''; fTemplate = ''; fPartner = ''; fStatus = ''">清空筛选</button>
+      <button class="btn ghost sm" @click="clearAllFilters">清空筛选</button>
     </div>
 
-    <!-- 按日期分组的记录列表（表格密度，信息看全） -->
-    <template v-else v-for="g in groups" :key="g.key">
-      <div class="date-group">
-        {{ g.label }}
-        <span class="dg-count">{{ g.list.length }} 条</span>
+    <!-- 按日期分组的记录列表：整张表只有一个表头（sticky 吸顶），
+         日期组标题变成表内的一行分隔。原来每进一个日期组就重画一次表头，
+         三组就白花 68px 高度，一屏少看两行。 -->
+    <div v-else class="card rec-card">
+      <div class="rec-head">
+        <span>时间</span>
+        <span class="rec-c-title">标题</span>
+        <span class="rec-author">作者</span>
+        <span class="rec-tpl">模板</span>
+        <span class="rec-pt">合作伙伴</span>
+        <span>状态</span>
+        <span>耗时</span>
+        <span>操作</span>
       </div>
-      <div class="card rec-card">
-        <div class="rec-head">
-          <span>时间</span><span class="rec-c-title">标题</span><span>模板</span><span>合作伙伴</span><span>状态</span><span>耗时</span><span>操作</span>
-        </div>
+      <template v-for="g in groups" :key="g.key">
+        <!-- 分组标题兼"只看这天"按钮：比让员工在两个日期框里手打快得多 -->
+        <button
+          class="date-group"
+          :class="{ picked: isPickedDay(g.key) }"
+          :title="isPickedDay(g.key) ? '取消只看这天' : `只看 ${g.key} 这天`"
+          @click="toggleDay(g.key)"
+        >
+          <span>{{ g.label }}</span>
+          <span class="dg-count">{{ g.list.length }} 条</span>
+        </button>
         <div v-for="it in g.list" :key="it.id" class="rec-row" :class="{ failed: it.status !== 'success' }">
           <div class="rec-main">
             <span class="rec-time">{{ fmtShort(it.created_at) }}</span>
@@ -304,6 +434,7 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
                 <span v-if="it.status !== 'success' && it.error_message" class="rec-err" :title="it.error_message">{{ it.error_message }}</span>
               </span>
             </span>
+            <span class="rec-author" :title="it.author">{{ it.author || '—' }}</span>
             <span class="rec-tpl" :title="it.template_name">{{ it.template_name }}</span>
             <span class="rec-pt" :title="it.partner_name">{{ it.partner_name || '—' }}</span>
             <span class="rec-status" :class="it.status === 'success' ? 'ok' : 'bad'">
@@ -315,8 +446,8 @@ onUnmounted(() => window.removeEventListener('keydown', onLightboxKeydown))
             </span>
           </div>
         </div>
-      </div>
-    </template>
+      </template>
+    </div>
 
     <!-- 底部操作：打开本机输出目录 -->
     <div v-if="!loading && !error && items.length" class="rec-foot">

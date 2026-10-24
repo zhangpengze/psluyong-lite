@@ -7,13 +7,13 @@ const fs = require('fs')
 const PW = 'C:/Users/Administrator/.workbuddy/binaries/node/workspace/node_modules/playwright-core'
 const { chromium } = require(PW)
 
-const OUT = process.argv[2] || path.join(process.cwd(), '.tmp-shots')
+const OUT = process.argv[2] || path.join(process.cwd(), '.shots')
 
 // 与 Rust open_aux_impl / tauri.conf.json 保持一致
 const WINDOWS = [
-  { route: 'main', file: 'w-main', w: 360, h: 500 },
+  { route: 'main', file: 'w-main', w: 360, h: 222 },
   { route: 'history', file: 'w-history', w: 840, h: 640 },
-  { route: 'settings', file: 'w-settings', w: 640, h: 700 },
+  { route: 'settings', file: 'w-settings', w: 640, h: 540 },
 ]
 
 async function main() {
@@ -62,14 +62,20 @@ async function main() {
         await page.screenshot({ path: path.join(OUT, `${win.file}-filtered.png`) })
       }
     }
-    // 设置窗：滚到「外观与窗口」卡片
+    // 设置窗：逐个标签页各截一张，确认每组都在一屏内、不出现滚动
     if (win.route === 'settings') {
-      await page.evaluate(() => {
-        const h3 = Array.from(document.querySelectorAll('.card h3')).find((n) => n.textContent.includes('外观与窗口'))
-        if (h3) h3.scrollIntoView({ block: 'start' })
-      })
-      await page.waitForTimeout(400)
-      await page.screenshot({ path: path.join(OUT, `${win.file}-window-card.png`) })
+      const tabs = await page.$$eval('.set-tabs button', (els) => els.map((e) => e.textContent.trim()))
+      for (const t of tabs) {
+        await page.click(`.set-tabs button:has-text("${t}")`)
+        await page.waitForTimeout(300)
+        const m = await page.evaluate(() => {
+          const body = document.querySelector('.body')
+          return { h: body.scrollHeight, client: body.clientHeight }
+        })
+        console.log(`  tab[${t}] scrollH=${m.h} clientH=${m.client} ${m.h > m.client ? '⚠ 需要滚动' : '一屏内'}`)
+        await page.screenshot({ path: path.join(OUT, `${win.file}-${t}.png`) })
+      }
+      await page.click('.set-tabs button >> nth=0')
     }
     await page.close()
   }

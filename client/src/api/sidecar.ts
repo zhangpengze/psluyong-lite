@@ -65,6 +65,10 @@ export interface ExportFail {
   ok: false
   error: string
   warnings?: string[]
+  /** 员工自己点的取消：不是失败，不该计入失败率，也不必"重新填写" */
+  cancelled?: boolean
+  /** PS 崩溃导致结果未知，需要人去输出目录确认 */
+  uncertain?: boolean
 }
 
 export type ExportResult = ExportOk | ExportFail
@@ -94,6 +98,9 @@ export interface HistoryItem {
   image_filename?: string
 }
 
+/** 时间区间：today/7/30/all 是快捷档，custom 由外部给起止日期 */
+export type HistoryRange = 'today' | '7' | '30' | 'all' | 'custom'
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response
   try {
@@ -115,6 +122,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+/** 本机 Photoshop 的识别结果（sidecar 自动探测，任意版本/任意盘符） */
+export interface PsInfo {
+  path: string
+  version: string
+  /** config=手动指定 / app-paths=注册表 / uninstall=安装信息 / scan=目录扫描 / none=未识别 */
+  source: string
+  source_label: string
+  found: boolean
+  /** 手填的路径已失效：生成用自动识别的顶替，界面要提醒一句 */
+  override_missing: boolean
+}
+
 export const api = {
   status: () =>
     request<{
@@ -122,6 +141,7 @@ export const api = {
       server_reachable: boolean
       com_available: boolean
       platform: string
+      ps: PsInfo
       config: ClientConfig
       pending: number
       dead: number
@@ -131,10 +151,13 @@ export const api = {
       log_dir: string
     }>('/status'),
 
+  /** 重新识别本机 Photoshop（装完/换版本后点一下） */
+  detectPs: () => request<{ ok: boolean; ps: PsInfo }>('/ps/detect', { method: 'POST' }),
+
   getConfig: () => request<{ ok: boolean; config: ClientConfig }>('/config'),
 
   saveConfig: (patch: Partial<ClientConfig>) =>
-    request<{ ok: boolean; config: ClientConfig }>('/config', {
+    request<{ ok: boolean; config: ClientConfig; error?: string }>('/config', {
       method: 'POST',
       body: JSON.stringify(patch),
     }),
@@ -201,15 +224,33 @@ export const api = {
       `/export/status?task_id=${encodeURIComponent(taskId)}`,
     ),
 
-  history: (range: '7' | '30' | 'all' = '7') =>
+  /** 取消生成：PS 挂住时员工唯一的自救手段 */
+  cancelExport: (taskId: string) =>
+    request<{ ok: boolean; task_id?: string; error?: string; message?: string }>('/export/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ task_id: taskId }),
+    }),
+
+  /**
+   * 记录列表。range 是快捷档（today/7/30/all），custom 由 start/end 决定
+   * （YYYY-MM-DD，两头可以只给一头，sidecar 会补齐并回显真正生效的 start/end）。
+   */
+  history: (range: HistoryRange = '7', start = '', end = '') =>
     request<{
       ok: boolean
       items: HistoryItem[]
       total: number
       range: string
+      /** 回显：真正生效的起止日期，界面直接显示，避免"只填起始日"时歧义 */
+      start: string
+      end: string
       size: number
       error?: string
-    }>(`/history?range=${range}`),
+    }>(
+      `/history?range=${range}` +
+        (start ? `&start=${encodeURIComponent(start)}` : '') +
+        (end ? `&end=${encodeURIComponent(end)}` : ''),
+    ),
 
   /** version 传 created_at 之类的稳定值：图片是可变资源，没版本号浏览器会一直重拉 */
   imageUrl: (recordId: number, full = false, version: string | number = '') =>

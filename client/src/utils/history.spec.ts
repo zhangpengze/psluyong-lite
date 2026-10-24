@@ -36,9 +36,14 @@ describe('localDateKey / dateKey', () => {
 })
 
 describe('formatTime', () => {
-  it('输出 MM-DD HH:mm', () => {
+  it('输出 YYYY-MM-DD HH:mm（带年，跨年不歧义）', () => {
     const iso = new Date(2026, 9, 21, 9, 5).toISOString()
-    expect(formatTime(iso)).toBe('10-21 09:05')
+    expect(formatTime(iso)).toBe('2026-10-21 09:05')
+  })
+
+  it('去年的记录也带年份，不会被读成今年', () => {
+    const iso = new Date(2025, 0, 5, 23, 59).toISOString()
+    expect(formatTime(iso)).toBe('2025-01-05 23:59')
   })
 
   it('解析失败时原样返回，方便发现脏数据', () => {
@@ -55,7 +60,11 @@ describe('groupByDate', () => {
       [row(at(21, 9), 'a'), row(at(21, 8), 'b'), row(at(20), 'c'), row(at(18), 'd')],
       today,
     )
-    expect(groups.map((g) => g.label)).toEqual(['今天', '昨天', '10月18日 周日'])
+    expect(groups.map((g) => g.label)).toEqual([
+      '今天 · 2026年10月21日 周三',
+      '昨天 · 2026年10月20日 周二',
+      '2026年10月18日 周日',
+    ])
     expect(groups[0].list.map((r) => r.title)).toEqual(['a', 'b'])
     expect(groups[2].list.map((r) => r.title)).toEqual(['d'])
   })
@@ -73,6 +82,11 @@ describe('groupByDate', () => {
   it('跨月的"昨天"也算昨天', () => {
     const oct1 = new Date(2026, 9, 1, 10, 0)
     const groups = groupByDate([row(new Date(2026, 8, 30, 12).toISOString())], oct1)
-    expect(groups[0].label).toBe('昨天')
+    expect(groups[0].label).toBe('昨天 · 2026年9月30日 周三')
+  })
+
+  it('分组标题一律带年份：去年的同一天不会和今年混在一起', () => {
+    const groups = groupByDate([row(new Date(2025, 9, 18, 12).toISOString())], today)
+    expect(groups[0].label).toBe('2025年10月18日 周六')
   })
 })

@@ -31,7 +31,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::WebviewWindowBuilder;
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, WebviewUrl, WebviewWindow,
 };
 
 /// 单实例通知端口（sidecar 用 8765，错开）
@@ -227,6 +227,28 @@ fn hide_main_window(window: WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|e| e.to_string())
 }
 
+/// 主窗按内容自适应高度（宽度不动）。
+///
+/// 迷你主窗只有「模板+合作伙伴 / 作者 / 标题 / 生成按钮」四行，高度写死必然
+/// 留死白：380 高时下方空出 140px 没有任何用途，260 高又装不下生成结果条。
+/// 所以高度交给前端量出来，这里只做两件事：逻辑像素换算 + 兜底夹紧。
+///
+/// 员工手动拖过高度后前端会停止调用（App.vue 里的 autoFit），
+/// 因此这里不需要记偏好，也不会和用户的拖拽抢。
+#[tauri::command]
+fn set_main_height(window: WebviewWindow, height: f64) -> Result<(), String> {
+    if !(160.0..=900.0).contains(&height) {
+        return Err("height 超出合理范围".into());
+    }
+    // inner_size 是物理像素，换算回逻辑宽度，避免高 DPI 下窗口被横向拉伸
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let width = size.width as f64 / scale;
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn set_close_to_tray(state: tauri::State<'_, CloseToTray>, on: bool) {
     if let Ok(mut guard) = state.0.lock() {
@@ -289,6 +311,9 @@ fn dock_window(app: AppHandle, window: WebviewWindow, side: String) -> Result<()
         s.side = Some(side.clone());
         s.stop = Some(stop.clone());
     }
+    // 贴上也广播一次：前端靠它记住"这次贴的是哪一边"（下次启动还原用），
+    // 方向是 Rust 按距离挑出来的，前端本来并不知道，只有这里能告诉它
+    let _ = app.emit("dock-changed", json!({ "side": side.clone() }));
 
     let app2 = app.clone();
     let win = window.clone();
@@ -305,6 +330,54 @@ fn dock_window(app: AppHandle, window: WebviewWindow, side: String) -> Result<()
         );
     });
     Ok(())
+}
+
+/// 窗口中心离哪条屏缘最近就贴哪条。
+///
+/// 底部不算候选：贴底会压住 Windows 任务栏，员工还要点别处。
+/// 三边距离相等时取前面的（left），保证结果是确定的。
+fn nearest_side(
+    cx: f64,
+    cy: f64,
+    mpos: &PhysicalPosition<i32>,
+    msize: &PhysicalSize<u32>,
+) -> &'static str {
+    let candidates = [
+        ("left", cx - mpos.x as f64),
+        ("right", (mpos.x + msize.width as i32) as f64 - cx),
+        ("top", cy - mpos.y as f64),
+    ];
+    candidates
+        .iter()
+        .fold(None, |best: Option<(&str, f64)>, cur| match best {
+            Some(b) if b.1 <= cur.1 => Some(b),
+            _ => Some(*cur),
+        })
+        .map(|(s, _)| s)
+        .unwrap_or("right")
+}
+
+/// 主窗贴到"离得最近的那一条屏缘"。
+///
+/// 贴哪一边不该由员工在设置里选——跟 QQ 的自动隐藏一样，窗口在哪条边就贴哪条。
+/// 手动拖到 24px 内松手走 check_auto_dock（有阈值判断），点主窗上的贴边按钮走这里
+/// （窗口可能停在屏幕中间，没有"最近的屏缘"概念，就按窗口中心到各边的距离挑）。
+#[tauri::command]
+fn dock_main_nearest(app: AppHandle) -> Result<(), String> {
+    let Some(main) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let monitor = main
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("找不到窗口所在的显示器")?;
+    let pos = main.outer_position().map_err(|e| e.to_string())?;
+    let size = main.outer_size().map_err(|e| e.to_string())?;
+
+    let cx = pos.x as f64 + size.width as f64 / 2.0;
+    let cy = pos.y as f64 + size.height as f64 / 2.0;
+    let side = nearest_side(cx, cy, monitor.position(), monitor.size());
+    dock_window(app, main, side.to_string())
 }
 
 /// 主窗贴边开关：空串 = 取消贴边。设置页改贴边方向也走这里
@@ -531,9 +604,11 @@ fn open_aux_window(app: AppHandle, kind: String, x: i32, y: i32) -> Result<(), S
 }
 
 fn open_aux_impl(app: &AppHandle, kind: &str, x: i32, y: i32) -> Result<(), String> {
+    // 尺寸按"最长的那一屏内容"定：记录窗一屏约 11 行，设置窗最高的
+    // 「高级」分组 403px + 标签 34 + 保存栏 53 ≈ 490，给到 540 就不需要滚了。
     let (label, title, w, h) = match kind {
         "history" => ("history", "录用记录", 840.0, 640.0),
-        "settings" => ("settings", "设置", 640.0, 700.0),
+        "settings" => ("settings", "设置", 640.0, 540.0),
         _ => return Err("kind 只能是 history 或 settings".into()),
     };
     if let Some(win) = app.get_webview_window(label) {
@@ -784,9 +859,11 @@ pub fn run() {
             dock_window,
             undock_window,
             set_main_dock,
+            dock_main_nearest,
             check_auto_dock,
             open_aux_window,
             hide_main_window,
+            set_main_height,
             set_close_to_tray,
             set_tray_tooltip,
             broadcast_event
@@ -806,4 +883,61 @@ pub fn run() {
                 }
             }
         });
+}
+
+// ==================== 贴边方向的纯函数测试 ====================
+// 挑哪条边是"窗口在哪就贴哪"的关键一步：贴错了员工看到的是窗口跑去了另一头，
+// 而这玩意儿在 Tauri 里跑起来需要一个真窗口，所以把计算抽成纯函数单独验。
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+
+    fn monitor(x: i32, y: i32, w: u32, h: u32) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
+        (PhysicalPosition::new(x, y), PhysicalSize::new(w, h))
+    }
+
+    #[test]
+    fn 贴到离得最近的那一条边() {
+        let (mpos, msize) = monitor(0, 0, 1920, 1080);
+        // 窗口中心落在左上区域 → 左
+        assert_eq!(nearest_side(120.0, 300.0, &mpos, &msize), "left");
+        // 靠右 → 右
+        assert_eq!(nearest_side(1800.0, 300.0, &mpos, &msize), "right");
+        // 靠上 → 上
+        assert_eq!(nearest_side(900.0, 20.0, &mpos, &msize), "top");
+        // 屏幕正中（900,540）：距顶 540 < 距左 900 < 距右 1020 → 收上去。
+        // 居中时贴顶部比贴左右更安全：左右容易挡住旁边的窗口
+        assert_eq!(nearest_side(900.0, 540.0, &mpos, &msize), "top");
+    }
+
+    #[test]
+    fn 距离相等时结果确定() {
+        let (mpos, msize) = monitor(0, 0, 1920, 1080);
+        // 窗口中心在屏幕水平中点且偏下：左右距离相等（960），且都比距上近，
+        // 这时必须稳定取 left，不能随遍历顺序变来变去
+        assert_eq!(nearest_side(960.0, 1000.0, &mpos, &msize), "left");
+        assert_eq!(nearest_side(960.0, 1000.0, &mpos, &msize), "left");
+    }
+
+    #[test]
+    fn 副屏坐标偏移也算对() {
+        // 主屏 1920 宽，副屏从左往右排 → 副屏原点 x=1920
+        let (mpos, msize) = monitor(1920, 0, 1920, 1080);
+        assert_eq!(nearest_side(1950.0, 500.0, &mpos, &msize), "left");
+        assert_eq!(nearest_side(3800.0, 500.0, &mpos, &msize), "right");
+    }
+
+    #[test]
+    fn 底部永远不是候选() {
+        let (mpos, msize) = monitor(0, 0, 1920, 1080);
+        // 窗口死死贴住底边：贴底会压住 Windows 任务栏，员工还要点别处，
+        // 所以只能在左/右/上里挑
+        for (cx, cy) in [(960.0, 1070.0), (100.0, 1070.0), (1800.0, 1070.0)] {
+            let side = nearest_side(cx, cy, &mpos, &msize);
+            assert!(
+                side == "left" || side == "right" || side == "top",
+                "底部不该成为候选，实际返回 {side}"
+            );
+        }
+    }
 }

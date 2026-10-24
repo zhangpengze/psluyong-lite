@@ -15,9 +15,9 @@
       {
         "title": "期刊录用助手",
         "width": 360,
-        "height": 440,
+        "height": 222,
         "minWidth": 300,
-        "minHeight": 340,
+        "minHeight": 180,
         "resizable": true,
         "center": true,
         "decorations": true

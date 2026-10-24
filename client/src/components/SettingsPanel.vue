@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { api, type ClientConfig, type TemplateItem } from '../api/sidecar'
+import {
+  api,
+  type ClientConfig,
+  type PsInfo,
+  type TemplateItem,
+} from '../api/sidecar'
 import { useConfirm } from '../composables/useConfirm'
 import { useToast } from '../composables/useToast'
 import { copyText } from '../utils/clipboard'
@@ -9,6 +14,8 @@ const props = defineProps<{
   config: ClientConfig | null
   serverOk: boolean
   templates: TemplateItem[]
+  /** 本机 Photoshop 的识别结果（由外壳的 /status 轮询带下来，不重复请求） */
+  ps: PsInfo | null
 }>()
 const emit = defineEmits<{ saved: [ClientConfig]; 'templates-changed': [] }>()
 
@@ -32,6 +39,9 @@ const form = reactive<ClientConfig>({
   title_placeholder: '{{标题}}',
   filename_rule: 'author_title',
   always_on_top: false,
+  // dock_side 只为让表单凑齐 ClientConfig 的类型而保留在这里：
+  // 贴边方向已经不让人选了（拖到哪条屏缘就贴哪条，跟 QQ 隐藏一样），
+  // 这一项是"上次贴到哪边"的运行状态，界面不展示、不参与 dirty、也不保存。
   dock_side: '',
   auto_dock: true,
   close_to_tray: true,
@@ -41,11 +51,30 @@ const form = reactive<ClientConfig>({
   history_win_y: -1,
   settings_win_x: -1,
   settings_win_y: -1,
+  // theme 只为凑齐 ClientConfig 的类型而留着：设置窗不再提供主题切换
+  // （主窗头部有太阳/月亮按钮），表单里也不读它
   theme: 'dark',
 })
 
 /** 名单用「一行一个」的文本框维护，比一堆输入框更适合批量粘贴 */
 const partnersText = ref('')
+
+// ==================== 分组标签 ====================
+// 原来 5 张卡片加一个折叠区平铺下来 1920px，窗口只有 700px，要滚 2.75 屏，
+// 找「贴边方向」得先把「账号」滚过去。改成一次只显示一组，每组的量都在
+// 一屏 400px 以内，设置页从此不滚。
+type Tab = 'account' | 'templates' | 'generate' | 'window' | 'advanced'
+const TABS: { key: Tab; label: string }[] = [
+  { key: 'account', label: '账号' },
+  { key: 'templates', label: '模板' },
+  { key: 'generate', label: '生成' },
+  // 标签名叫「窗口」而不是「外观」：主题已经搬到主窗头部，这里只剩主窗行为
+  { key: 'window', label: '窗口' },
+  { key: 'advanced', label: '高级' },
+]
+const tab = ref<Tab>('account')
+/** config 是异步到的：等它到了再按"哪一项没配"决定落在哪一页 */
+let tabDecided = false
 
 const saving = ref(false)
 const uploading = ref(false)
@@ -54,23 +83,47 @@ const showKey = ref(false)
 const dragging = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 
+/** 「重新识别」：装完/换版本 PS 后点一下，不用重启软件 */
+const detecting = ref(false)
+/** 刚识别出来的结果：优先于外壳轮询带下来的 props.ps，
+ *  否则点完"重新识别"要等最多 60 秒的下一次轮询，面板才肯变。 */
+const psLocal = ref<PsInfo | null>(null)
+const psShown = computed(() => psLocal.value ?? props.ps)
+watch(
+  () => props.ps,
+  () => {
+    // 外壳轮到了新结果就以外壳为准，避免本地那份盖掉更新的配置
+    psLocal.value = null
+  },
+)
+
+async function redetect() {
+  detecting.value = true
+  try {
+    const res = await api.detectPs()
+    if (res.ok) psLocal.value = res.ps
+    if (res.ok && res.ps.found) flash(`已识别到：${res.ps.path}`, 'success')
+    else if (res.ok) flash('仍未识别到 Photoshop，请确认已安装', 'warning')
+    else flash('识别失败，请重试', 'error')
+  } catch {
+    flash('识别失败，请重试', 'error')
+  } finally {
+    detecting.value = false
+  }
+}
+
 const templateCount = computed(() => props.templates.length)
 const nameOk = computed(() => form.employee_name.trim().length > 0)
 const urlOk = computed(() => form.server_url.trim().startsWith('http'))
 
-/** 图片命名选项：示例用固定的作者/标题，让员工一眼看出区别 */
+/** 图片命名：只留两个选项，示例跟着选中的那个走，比两张各自带例子的卡片省 70px */
 const FILENAME_OPTIONS = [
   { value: 'author', label: '作者姓名', sample: '李四.jpg' },
   { value: 'author_title', label: '作者 + 标题', sample: '李四_基于深度学习的图像分割方法研究.jpg' },
 ] as const
-
-/** 贴边方向：空 = 不贴边 */
-const DOCK_OPTIONS = [
-  { value: '', label: '不贴边', sample: '普通窗口，随处放' },
-  { value: 'left', label: '贴左缘', sample: '藏到屏幕左边，露 6px 窄条' },
-  { value: 'right', label: '贴右缘', sample: '藏到屏幕右边，露 6px 窄条' },
-  { value: 'top', label: '贴上缘', sample: '藏到屏幕顶部，露 6px 窄条' },
-] as const
+const filenameSample = computed(
+  () => FILENAME_OPTIONS.find((o) => o.value === form.filename_rule)?.sample ?? FILENAME_OPTIONS[0].sample,
+)
 
 /** 路径字段必须是完整路径（Windows 盘符开头）。
  *  不拦的代价：员工填个「姓名」当时看不出问题，生成时 PS 才报
@@ -96,10 +149,9 @@ const dirty = computed(
       form.title_placeholder !== props.config.title_placeholder ||
       form.filename_rule !== props.config.filename_rule ||
       form.always_on_top !== props.config.always_on_top ||
-      form.dock_side !== props.config.dock_side ||
       form.auto_dock !== props.config.auto_dock ||
       form.close_to_tray !== props.config.close_to_tray ||
-      form.theme !== props.config.theme ||
+      // 主题不在 dirty 判定里：它由主窗头部的按钮改，设置窗只负责别把它冲掉
       partnersText.value !== (props.config.partners ?? []).join('\n')),
 )
 
@@ -118,6 +170,11 @@ watch(
     Object.assign(form, cfg)
     partnersText.value = (cfg.partners ?? []).join('\n')
     hydrated = true
+    // 第一次拿到配置：缺哪一项就直接停在哪一页，省得员工自己找
+    if (!tabDecided) {
+      tabDecided = true
+      tab.value = !cfg.employee_name || !cfg.server_url || !cfg.api_key ? 'account' : 'templates'
+    }
   },
   { immediate: true },
 )
@@ -129,22 +186,27 @@ function flash(text: string, type: 'success' | 'warning' | 'error' = 'success') 
 async function save() {
   if (!nameOk.value) {
     flash('请填写你的姓名，主管后台按姓名统计', 'error')
+    tab.value = 'account'
     return
   }
   if (!urlOk.value) {
     flash('服务器地址应以 http:// 开头', 'error')
+    tab.value = 'account'
     return
   }
   if (!outputDirOk.value) {
     flash('输出目录不是完整路径，应以盘符（如 D:\\）开头', 'error')
+    tab.value = 'advanced'
     return
   }
   if (!templateDirOk.value) {
     flash('模板目录不是完整路径，应以盘符（如 D:\\）开头', 'error')
+    tab.value = 'advanced'
     return
   }
   if (!psPathOk.value) {
     flash('Photoshop 路径不是完整路径，应以盘符（如 C:\\）开头', 'error')
+    tab.value = 'advanced'
     return
   }
 
@@ -164,11 +226,18 @@ async function save() {
       title_placeholder: form.title_placeholder.trim() || '{{标题}}',
       filename_rule: form.filename_rule,
       always_on_top: form.always_on_top,
-      dock_side: ['left', 'right', 'top'].includes(form.dock_side) ? form.dock_side : '',
       auto_dock: form.auto_dock,
       close_to_tray: form.close_to_tray,
-      theme: form.theme === 'light' ? 'light' : 'dark',
+      // 主题故意不发：设置窗可能有未保存改动停在这儿，而员工刚在主窗换了主题。
+      // 带着表单里的旧 theme 一起提交，会把他刚选的覆盖回去。
+      // 补丁语义是"没带的键不改"，所以这里省掉最安全。
     })
+    // 服务端会校验字段范围：不 ok 就不能 emit saved，
+    // 否则界面提示"已保存"而实际一个字节都没落盘
+    if (!res.ok) {
+      flash(res.error || '保存失败', 'error')
+      return
+    }
     emit('saved', res.config)
     flash('已保存')
   } catch (e) {
@@ -339,9 +408,23 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <div class="stack">
-    <div class="card">
-      <h3>账号</h3>
+  <div class="stack set">
+    <!-- 分组标签：每组内容都在一屏内，设置页不再需要滚 2.75 屏 -->
+    <nav class="set-tabs" role="tablist">
+      <button
+        v-for="t in TABS"
+        :key="t.key"
+        role="tab"
+        :aria-selected="tab === t.key"
+        :class="{ active: tab === t.key }"
+        @click="tab = t.key"
+      >
+        {{ t.label }}<span v-if="t.key === 'templates'" class="tab-badge">{{ templateCount }}</span>
+      </button>
+    </nav>
+
+    <!-- ============ 账号 ============ -->
+    <div v-if="tab === 'account'" class="card">
       <div class="field">
         <label>你的姓名<span class="req">*</span></label>
         <input v-model="form.employee_name" type="text" placeholder="例如：张三" />
@@ -374,12 +457,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </svg>
           </button>
         </div>
+        <div class="hint">每个员工一个，用来向服务器证明身份；丢了找主管重新要</div>
       </div>
     </div>
 
-    <div class="card">
-      <h3>PS 模板<span class="sub">{{ templateCount }} 个</span></h3>
-
+    <!-- ============ 模板 ============ -->
+    <div v-else-if="tab === 'templates'" class="card">
       <input ref="fileInput" type="file" accept=".psd" multiple style="display: none" @change="onPickFiles" />
       <div
         class="dropzone"
@@ -402,31 +485,31 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <span>{{ uploading ? '上传中…' : '点击选择 PSD 文件，或拖拽到此处' }}</span>
       </div>
 
-      <div class="btnrow" style="margin-top: 8px">
-        <button class="btn ghost" @click="openDir">打开模板目录</button>
-      </div>
-
       <div v-if="templateCount" class="tpl-list" style="margin-top: 9px">
         <div v-for="t in templates" :key="t.id" class="tpl-row">
           <span class="tpl-name" :title="t.name">{{ t.name }}</span>
           <span class="tpl-size">{{ sizeText(t.size) }}</span>
-          <button class="btn mini" @click="removeTemplate(t)">删除</button>
+          <button
+            class="tpl-del"
+            :title="`删除模板「${t.name}」`"
+            :aria-label="`删除模板 ${t.name}`"
+            @click="removeTemplate(t)"
+          >
+            <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" />
+            </svg>
+          </button>
         </div>
       </div>
       <div v-else class="hint" style="margin-top: 8px">还没有模板，先上传一个 PSD 吧</div>
-    </div>
 
-    <div class="card">
-      <h3>合作伙伴</h3>
-      <div class="field">
-        <label>名单（一行一个）</label>
-        <textarea v-model="partnersText" rows="4" placeholder="华东出版社&#10;南方文化" />
-        <div class="hint">录用页的合作伙伴从这里选，按需要自己增删，保存后生效</div>
+      <div class="tpl-foot">
+        <button type="button" class="link" @click="openDir">打开模板目录</button>
       </div>
     </div>
 
-    <div class="card">
-      <h3>生成设置</h3>
+    <!-- ============ 生成 ============ -->
+    <div v-else-if="tab === 'generate'" class="card">
       <div class="field">
         <label>JPG 质量（1-12）</label>
         <div class="range-row">
@@ -437,21 +520,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </div>
       <div class="field">
         <label>图片命名</label>
-        <div class="opt-list">
-          <label
+        <div class="chip-row">
+          <button
             v-for="opt in FILENAME_OPTIONS"
             :key="opt.value"
-            class="opt-row"
+            class="range-chip"
             :class="{ active: form.filename_rule === opt.value }"
+            @click="form.filename_rule = opt.value"
           >
-            <input v-model="form.filename_rule" type="radio" name="filename-rule" :value="opt.value" />
-            <span class="opt-text">
-              <span class="opt-name">{{ opt.label }}</span>
-              <span class="opt-sample">{{ opt.sample }}</span>
-            </span>
-          </label>
+            {{ opt.label }}
+          </button>
         </div>
-        <div class="hint">同名图片已存在时自动加 (2)、(3)，不会覆盖已生成的图</div>
+        <div class="hint">例如 <span class="mono">{{ filenameSample }}</span>；同名图片自动加 (2)、(3)，不覆盖已生成的图</div>
       </div>
       <div class="field">
         <label>生成后清空表单</label>
@@ -462,18 +542,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </label>
         <div class="hint">开：生成成功后自动清空作者和标题，方便连续录入；关：保留内容便于修改重试</div>
       </div>
+      <div class="field">
+        <label>合作伙伴名单（一行一个）</label>
+        <textarea v-model="partnersText" rows="4" placeholder="华东出版社&#10;南方文化" />
+        <div class="hint">录用页的合作伙伴从这里选，按需要自己增删，保存后生效</div>
+      </div>
     </div>
 
-    <div class="card">
-      <h3>外观与窗口</h3>
-      <div class="field">
-        <label>主题</label>
-        <div class="range-row">
-          <button class="range-chip" :class="{ active: form.theme !== 'light' }" @click="form.theme = 'dark'">深色</button>
-          <button class="range-chip" :class="{ active: form.theme === 'light' }" @click="form.theme = 'light'">浅色</button>
-        </div>
-        <div class="hint">偏好存在本机配置里，换机器不丢</div>
-      </div>
+    <!-- ============ 窗口 ============ -->
+    <!-- 主题不在这儿：主窗头部有个一键切换的按钮，同一个开关不该有两个入口 -->
+    <div v-else-if="tab === 'window'" class="card">
       <div class="field">
         <label>主窗置顶</label>
         <label class="switch">
@@ -484,31 +562,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <div class="hint">开：主窗浮在其他应用之上，边看资料边录入；打开记录/设置窗时主窗自动让出</div>
       </div>
       <div class="field">
-        <label>贴边方向</label>
-        <div class="opt-list">
-          <label
-            v-for="opt in DOCK_OPTIONS"
-            :key="opt.value"
-            class="opt-row"
-            :class="{ active: form.dock_side === opt.value }"
-          >
-            <input v-model="form.dock_side" type="radio" name="dock-side" :value="opt.value" />
-            <span class="opt-text">
-              <span class="opt-name">{{ opt.label }}</span>
-              <span class="opt-sample">{{ opt.sample }}</span>
-            </span>
-          </label>
-        </div>
-        <div class="hint">贴边后窗口大部分移出屏幕，只露 6px 窄条，鼠标碰到即滑出</div>
-      </div>
-      <div class="field">
         <label>拖到边缘自动贴边</label>
         <label class="switch">
           <input v-model="form.auto_dock" type="checkbox" />
           <span class="sw" />
           <span>{{ form.auto_dock ? '开' : '关' }}</span>
         </label>
-        <div class="hint">开：把主窗拖到任一屏缘 24px 内松手即贴边；关：只点主窗上的贴边按钮生效</div>
+        <div class="hint">开：把主窗拖到任一屏缘 24px 内松手即贴边，<b>贴哪边看离哪边近</b>，不用选；关：只点主窗上的贴边按钮生效</div>
       </div>
       <div class="field">
         <label>关闭主窗时</label>
@@ -521,63 +581,87 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </div>
     </div>
 
-    <details class="adv">
-      <summary>
-        高级设置
-        <span class="adv-arrow">
-          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 6l4 4 4-4" />
-          </svg>
-        </span>
-      </summary>
-      <div class="adv-body">
-        <div class="field">
-          <label>Photoshop 路径</label>
-          <input v-model="form.ps_path" type="text" placeholder="留空则自动连接正在运行的 Photoshop" :style="psPathOk ? '' : 'border-color: var(--err)'" />
-          <div v-if="!psPathOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 C:\）开头</div>
-          <div v-else class="hint">建议先手动打开 Photoshop 再生成，速度更快</div>
-        </div>
-        <div class="field">
-          <label>输出目录</label>
-          <input v-model="form.output_dir" type="text" placeholder="D:\期刊录用" :style="outputDirOk ? '' : 'border-color: var(--err)'" />
-          <div v-if="!outputDirOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 D:\）开头；相对路径会导致导出失败</div>
-          <div v-else class="hint">生成的成品图片保存在这里，修改后对下次生成生效</div>
-        </div>
-        <div class="field">
-          <label>模板目录</label>
-          <input v-model="form.template_dir" type="text" placeholder="留空则用默认目录" :style="templateDirOk ? '' : 'border-color: var(--err)'" />
-          <div v-if="!templateDirOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 D:\）开头</div>
-          <div v-else class="hint">一般不用改；要放共享盘统一更新时再改</div>
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>作者占位文字</label>
-            <input v-model="form.author_placeholder" type="text" placeholder="{{ '{{作者}}' }}" />
+    <!-- ============ 高级 ============ -->
+    <div v-else class="card">
+      <div class="field">
+        <label>Photoshop 路径</label>
+        <input v-model="form.ps_path" type="text" placeholder="留空＝自动识别（推荐）" :style="psPathOk ? '' : 'border-color: var(--err)'" />
+        <div v-if="!psPathOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 C:\）开头</div>
+        <div v-else-if="psShown" class="ps-detect" :class="{ bad: !psShown.found }">
+          <div class="pd-line">
+            <svg v-if="psShown.found" class="pd-ico ok" viewBox="0 0 16 16" width="12" height="12">
+              <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+              <path d="M5.2 8.3l2 2 3.6-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <svg v-else class="pd-ico no" viewBox="0 0 16 16" width="12" height="12">
+              <path d="M8 1.6l6.4 11.2H1.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+              <path d="M8 6v3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+              <circle cx="8" cy="11.4" r="0.85" fill="currentColor" />
+            </svg>
+            <b>{{ psShown.found ? '已自动识别' : '未识别到 Photoshop' }}</b>
+            <!-- 来源和版本并到状态行：高级标签本来就快装不下了，能省一行是一行 -->
+            <span v-if="psShown.found" class="pd-ver">
+              <template v-if="psShown.version">版本 {{ psShown.version }} · </template>{{ psShown.source_label }}
+            </span>
+            <button
+              class="range-chip"
+              :disabled="detecting"
+              :title="psShown.found ? '换版本或重装 Photoshop 后点这里' : '装好 Photoshop 后再试一次'"
+              @click="redetect"
+            >
+              {{ detecting ? '识别中…' : '重新识别' }}
+            </button>
           </div>
-          <div class="field">
-            <label>标题占位文字</label>
-            <input v-model="form.title_placeholder" type="text" placeholder="{{ '{{标题}}' }}" />
+          <div v-if="psShown.found" class="pd-path" :title="psShown.path">{{ psShown.path }}</div>
+          <!-- 识别不到时才需要指路：认出来了还唠叨"任意版本都能认"是噪音 -->
+          <div v-else class="hint">请先安装 Photoshop；装完仍识别不到再手动填上面的路径</div>
+          <div v-if="psShown.override_missing" class="hint" style="color: var(--err)">
+            你手动填写的路径不存在，当前用的是自动识别结果
           </div>
         </div>
-        <div class="hint">PS 模板里代表作者/标题的那两段文字，生成时会自动替换</div>
+        <div v-else class="hint">正在识别本机的 Photoshop…</div>
       </div>
-    </details>
+      <div class="field">
+        <label>输出目录</label>
+        <input v-model="form.output_dir" type="text" placeholder="D:\期刊录用" :style="outputDirOk ? '' : 'border-color: var(--err)'" />
+        <div v-if="!outputDirOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 D:\）开头；相对路径会导致导出失败</div>
+        <div v-else class="hint">生成的成品图片保存在这里，修改后对下次生成生效</div>
+      </div>
+      <div class="field">
+        <label>模板目录</label>
+        <input v-model="form.template_dir" type="text" placeholder="留空则用默认目录" :style="templateDirOk ? '' : 'border-color: var(--err)'" />
+        <div v-if="!templateDirOk" class="hint" style="color: var(--err)">不是完整路径，应以盘符（如 D:\）开头</div>
+        <div v-else class="hint">一般不用改；要放共享盘统一更新时再改</div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>作者占位文字</label>
+          <input v-model="form.author_placeholder" type="text" placeholder="{{ '{{作者}}' }}" />
+        </div>
+        <div class="field">
+          <label>标题占位文字</label>
+          <input v-model="form.title_placeholder" type="text" placeholder="{{ '{{标题}}' }}" />
+        </div>
+      </div>
+      <div class="hint">PS 模板里代表作者/标题的那两段文字，生成时会自动替换</div>
 
-    <!-- 版本与诊断：员工报障时一键复制环境信息（放在保存栏之前，避免被 sticky 底栏挡住） -->
-    <div class="diag-row">
-      <span class="diag-ver">客户端 v{{ appVersion }} · 本地服务 v{{ diag?.version ?? '—' }}</span>
-      <span class="spacer" />
-      <a class="link" @click="copyDiag">复制诊断信息</a>
-      <a class="link" @click="openLogs">打开日志</a>
+      <div class="diag-row">
+        <span class="diag-ver">客户端 v{{ appVersion }} · 本地服务 v{{ diag?.version ?? '—' }}</span>
+        <span class="spacer" />
+        <a class="link" @click="copyDiag">复制诊断信息</a>
+        <a class="link" @click="openLogs">打开日志</a>
+      </div>
     </div>
 
-    <div class="save-bar">
+    <!-- 保存栏：只有改过东西才出现。常驻一条 53px 的空栏等于天天提醒
+         "你还没改"，改完它自己滑走，比一句"已保存"更有说服力。 -->
+    <div v-if="dirty" class="save-bar">
       <span class="sb-hint">
-        <span class="sb-dot" :class="{ saved: !dirty }" />
-        {{ dirty ? '有未保存的改动' : '所有改动已保存' }}
+        <span class="sb-dot" />
+        有未保存的改动
         <span style="opacity: 0.75">· <kbd>Ctrl</kbd> <kbd>S</kbd></span>
       </span>
-      <button class="btn sm" style="width: auto; padding: 7px 16px" :disabled="saving || !dirty" @click="save">
+      <button class="btn sm" style="width: auto; padding: 7px 16px" :disabled="saving" @click="save">
         {{ saving ? '保存中…' : '保存设置' }}
       </button>
     </div>

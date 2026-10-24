@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, type ClientConfig, type TemplateItem } from './api/sidecar'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { api, type ClientConfig, type PsInfo, type TemplateItem } from './api/sidecar'
 import { useConfirm } from './composables/useConfirm'
 import { useToast } from './composables/useToast'
 import {
@@ -14,12 +14,14 @@ import {
   listenCloseWhileBusy,
   listenDockChanged,
   listenWindowMoved,
+  dockMainNearest,
   openWindow,
   restoreWindowRect,
   setCloseToTray,
   setGenerating,
   setMainAlwaysOnTop,
   setMainDock,
+  setMainHeight,
   setTrayTooltip,
   type DockSide,
 } from './api/windowCtl'
@@ -51,6 +53,8 @@ const cfg = ref<ClientConfig | null>(null)
 const templates = ref<TemplateItem[]>([])
 const partners = ref<string[]>([])
 const serverOk = ref(false)
+/** 本机 Photoshop 的自动识别结果（sidecar /status 带下来） */
+const ps = ref<PsInfo | null>(null)
 const comAvailable = ref(false)
 const pending = ref(0)
 const deadCount = ref(0)
@@ -72,18 +76,15 @@ watch(generating, (v) => {
   if (hasTauri()) setGenerating(v).catch(() => {})
 })
 
-const showSetupHint = computed(
-  () => !cfg.value?.employee_name || !cfg.value?.api_key || !cfg.value?.server_url,
-)
-
-/** 配置完成度：姓名 / API Key / 服务器地址 三项 */
+/** 配置完成度：姓名 / API Key / 服务器地址 三项。
+ *  short 是按钮上用的短词（按钮只有 340px 宽，塞不下整句）；
+ *  label 是悬停提示里的完整说法。 */
 const setupItems = computed(() => [
-  { label: '填写你的姓名', done: !!cfg.value?.employee_name },
-  { label: '填写服务器地址', done: !!cfg.value?.server_url },
-  { label: '填写 API Key（向主管索取）', done: !!cfg.value?.api_key },
+  { label: '填写你的姓名', short: '姓名', done: !!cfg.value?.employee_name },
+  { label: '填写服务器地址', short: '服务器地址', done: !!cfg.value?.server_url },
+  { label: '填写 API Key（向主管索取）', short: 'API Key', done: !!cfg.value?.api_key },
 ])
-const setupDoneCount = computed(() => setupItems.value.filter((i) => i.done).length)
-/** 只列还没做的项，已完成的不占地方 */
+/** 只列还没做的项，已完成的不占地方；短词印在主按钮上，完整说法挂按钮 title */
 const missingItems = computed(() => setupItems.value.filter((i) => !i.done))
 
 const deadHint = computed(
@@ -102,6 +103,7 @@ async function refreshStatus(quiet = false): Promise<boolean> {
     cfg.value = s.config
     serverOk.value = s.server_reachable
     comAvailable.value = s.com_available
+    ps.value = s.ps ?? null
     pending.value = s.pending
     deadCount.value = s.dead ?? 0
     serverBusy.value = !!s.busy
@@ -236,6 +238,25 @@ function applyTheme(t: 'dark' | 'light') {
   document.documentElement.dataset.theme = t
 }
 
+/**
+ * 主窗头部一键切主题。
+ *
+ * 设置里原来也有「主题」——同一个开关两处都能改，员工每次都得想一下该去哪儿，
+ * 于是撤了。按钮上显示的是**当前**主题的图标（深色=月亮、浅色=太阳），
+ * title 说明点下去会变成什么，不用猜。
+ */
+async function toggleTheme() {
+  const next = theme.value === 'light' ? 'dark' : 'light'
+  applyTheme(next)
+  try {
+    await api.saveConfig({ theme: next })
+    // 记录窗/设置窗可能开着：它们各自 refreshStatus 时会读到新配置，这里只负责通知
+    broadcastEvent('config-changed', { theme: next }).catch(() => {})
+  } catch {
+    /* 存不上面至少本次生效，下次启动回到旧主题，不值得弹错 */
+  }
+}
+
 // ==================== 窗口：置顶 / 贴边 / 位置记忆 / 多窗 ====================
 // 浏览器预览里 hasTauri() 为 false，按钮隐藏、方法 no-op
 const hasWindowCtl = ref(hasTauri())
@@ -257,18 +278,16 @@ async function togglePin() {
   }
 }
 
+/**
+ * 主窗上的贴边按钮：开 / 关。
+ * 方向不在这里选，也不从配置里读——贴哪边由 Rust 按"窗口离哪条屏缘近"决定
+ * （和 QQ 自动隐藏一致）。dock-changed 回来后只负责把"上次贴到哪边"落盘，
+ * 设置里已经没有这一项了，它纯粹是下次启动还原用的状态。
+ */
 async function toggleDock() {
   try {
-    if (docked.value) {
-      await setMainDock('')
-      docked.value = false
-      await api.saveConfig({ dock_side: '' })
-    } else {
-      const side = (cfg.value?.dock_side || 'right') as DockSide
-      await setMainDock(side)
-      docked.value = true
-      await api.saveConfig({ dock_side: side })
-    }
+    if (docked.value) await setMainDock('')
+    else await dockMainNearest()
   } catch {
     /* 贴边失败保持原状 */
   }
@@ -322,6 +341,122 @@ async function applyWindowPrefs(c: ClientConfig) {
   }
 }
 
+// ==================== 主窗高度自适应 ====================
+// 迷你主窗只有「模板+合作伙伴 / 作者 / 标题 / 生成按钮」四行。高度写死必然
+// 留死白：380 高时下方空出 140px（占 37%，纯浪费），压到 260 又装不下
+// 生成结果条 + 注意事项。所以高度不写死，让内容决定：
+//   内容变了 → 量一次自然高度 → 让 Rust 改窗口高度。
+// 员工手动拖过高度（与我们所设值差 > 12px）就把控制权交还给他，不再抢。
+const MAIN_H_MIN = 180
+const MAIN_H_MAX = 560
+let autoFit = true
+let appliedH = 0
+let fitRaf = 0
+let contentRO: ResizeObserver | undefined
+let contentMO: MutationObserver | undefined
+
+/**
+ * 取一个块的内容高度。
+ * `.stack` 是 flex:1 0 auto，会被容器撑满，它的 scrollHeight 只是"当前高度"；
+ * 只有递归进它的孩子，量到的才是内容真实高度。
+ */
+function intrinsicHeight(el: HTMLElement): number {
+  const cs = getComputedStyle(el)
+  if (el.classList.contains('stack')) {
+    const gap = parseFloat(cs.rowGap || cs.gap) || 0
+    let h = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+    let n = 0
+    for (const kid of Array.from(el.children) as HTMLElement[]) {
+      h += intrinsicHeight(kid) + (n++ ? gap : 0)
+    }
+    return h
+  }
+  return el.scrollHeight
+}
+
+/** 窗口应有的内高 = 头部 + 内容区各块（含内边距与间距）+ 底栏 */
+function naturalMainHeight(): number {
+  const appEl = document.querySelector('.app') as HTMLElement | null
+  const bodyEl = document.querySelector('.body') as HTMLElement | null
+  if (!appEl || !bodyEl) return 0
+  const cs = getComputedStyle(bodyEl)
+  const gap = parseFloat(cs.rowGap || cs.gap) || 0
+  let h = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+  let n = 0
+  for (const kid of Array.from(bodyEl.children) as HTMLElement[]) {
+    if (getComputedStyle(kid).position === 'absolute') continue
+    h += intrinsicHeight(kid) + (n++ ? gap : 0)
+  }
+  for (const kid of Array.from(appEl.children) as HTMLElement[]) {
+    if (kid === bodyEl || getComputedStyle(kid).position === 'absolute') continue
+    h += kid.scrollHeight // 头部与底栏都是定高块，scrollHeight 即真实高度
+  }
+  return Math.ceil(h)
+}
+
+function fitMainHeight() {
+  if (!hasTauri() || route.value !== 'main' || !autoFit) return
+  const bodyEl = document.querySelector('.body') as HTMLElement | null
+  if (!bodyEl) return
+  const natural = naturalMainHeight()
+  if (!natural) return
+  // 第一次先把当前高度认下来：手动拖拽检测要靠它比对
+  if (!appliedH) appliedH = window.innerHeight
+  // +1：亚像素取整后差一点点就会冒出滚动条，宁可多 1px
+  let target = natural + 1
+  // 已经溢出就别指望"自然高度"能一步算准：溢出的这一刻宽度被滚动条吃掉 7px，
+  // 文字换行和自然高度都跟着变。直接按溢出差值补，补一次就到位。
+  const overflowPx = bodyEl.scrollHeight - bodyEl.clientHeight
+  if (overflowPx > 0) target = Math.max(target, window.innerHeight + overflowPx + 1)
+  target = Math.min(MAIN_H_MAX, Math.max(MAIN_H_MIN, target))
+  // 滞回：装不下立刻长高；装得下且富余 ≥ 6px 才缩。
+  // 否则「滚动条出现→可用宽度减 7px→文字换行→自然高度变大→又缩回去」
+  // 会来回抖，窗口底部一直抽搐。
+  const needsGrow = overflowPx > 0
+  const canShrink = window.innerHeight - target >= 6
+  if (!needsGrow && !canShrink) return
+  if (target === appliedH) return
+  appliedH = target
+  setMainHeight(target).catch(() => {})
+}
+
+function scheduleFit() {
+  if (fitRaf) return
+  fitRaf = requestAnimationFrame(() => {
+    fitRaf = 0
+    fitMainHeight()
+  })
+}
+
+/**
+ * 盯住内容：节点增删（结果条出现/收起、按钮文案切换）与自身高度变化都要重量。
+ * 只在主窗生效——记录窗/设置窗是固定尺寸、按需滚动，不该跟着内容缩。
+ */
+function watchMainContent() {
+  const bodyEl = document.querySelector('.body') as HTMLElement | null
+  if (!bodyEl) return
+  contentRO?.disconnect()
+  contentRO = new ResizeObserver(() => scheduleFit())
+  // 这些块不会被 flex 拉伸，高度变化就等于内容变化
+  bodyEl.querySelectorAll('.form-body, .result').forEach((el) => contentRO!.observe(el))
+  contentRO.observe(bodyEl)
+  contentMO?.disconnect()
+  contentMO = new MutationObserver(() => {
+    watchMainContent()
+    scheduleFit()
+  })
+  contentMO.observe(bodyEl, { childList: true, subtree: true })
+}
+
+/**
+ * 员工自己拖过高度就不再多管：否则他拖大一点，下次生成完又被弹回去。
+ * 容差 12px —— 我们自己的 setSize 落回来会有 1~2px 的取整差。
+ */
+function onWinResize() {
+  if (!appliedH) return
+  if (Math.abs(window.innerHeight - appliedH) > 12) autoFit = false
+}
+
 // ==================== 轮询、快捷键、跨窗口同步 ====================
 let statusTimer: number | undefined
 
@@ -355,7 +490,8 @@ async function startAfterReady() {
   if (cfg.value) applyWindowPrefs(cfg.value)
   listenDockChanged((side) => {
     docked.value = side !== null
-    if (side === null) api.saveConfig({ dock_side: '' }).catch(() => {})
+    // 只记住"贴在哪一边"：设置里已经不提供方向选择，这项纯粹是下次启动还原用
+    api.saveConfig({ dock_side: side ?? '' }).catch(() => {})
   })
   rectTimer = window.setInterval(rememberWindowRect, 10_000)
 
@@ -415,12 +551,21 @@ async function retryBoot() {
   if (ready) await startAfterReady()
 }
 
+/** 主窗内容就位后再开始自适应：启动期只有「正在启动…」，量了也没意义 */
+watch([booting, route], async () => {
+  await nextTick()
+  if (booting.value || route.value !== 'main') return
+  watchMainContent()
+  scheduleFit()
+})
+
 onMounted(async () => {
   // hash 驱动路由：三个窗口打开时各自带上 #/main #/history #/settings
   window.addEventListener('hashchange', () => {
     route.value = routeFromHash()
   })
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('resize', onWinResize)
 
   booting.value = true
   const ready = await waitForSidecar()
@@ -434,7 +579,11 @@ onUnmounted(() => {
   if (rectTimer) window.clearInterval(rectTimer)
   if (statusTimer) window.clearInterval(statusTimer)
   if (moveTimer) window.clearTimeout(moveTimer)
+  if (fitRaf) cancelAnimationFrame(fitRaf)
+  contentRO?.disconnect()
+  contentMO?.disconnect()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', onWinResize)
 })
 </script>
 
@@ -473,6 +622,21 @@ onUnmounted(() => {
             </svg>
           </button>
         </template>
+        <!-- 主题一键切换：设置里那份已撤，同一个开关不该有两个入口。
+             用"半黑半白的圆"而不是太阳/月亮：设置图标本身就是圆+射线，
+             在 360px 的头部里再来一个太阳，员工分不清谁是谁。
+             当前是深是浅看窗口就知道，title 说明点下去会变成什么。 -->
+        <button
+          class="icon-btn"
+          :title="theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
+          aria-label="切换主题"
+          @click="toggleTheme"
+        >
+          <svg viewBox="0 0 16 16" width="13" height="13">
+            <circle cx="8" cy="8" r="5.9" fill="none" stroke="currentColor" stroke-width="1.3" />
+            <path d="M8 2.1a5.9 5.9 0 0 0 0 11.8z" fill="currentColor" />
+          </svg>
+        </button>
         <span class="dot" :class="serverOk ? 'on' : 'off'" :title="serverOk ? '服务器正常' : '服务器离线，记录会存在本地'">
           {{ serverOk ? '' : '离线' }}
         </span>
@@ -496,18 +660,25 @@ onUnmounted(() => {
           <button class="btn ghost sm" style="margin-top: 9px" @click="retryBoot">重试连接</button>
         </div>
 
-        <!-- 主窗：未配完时一条细提示，点「去设置」开独立设置窗 -->
-        <div v-if="showSetupHint && route === 'main'" class="setup-strip">
-          <span class="ss-ico">!</span>
-          <span class="ss-text">
-            还差 {{ missingItems.length }} 步：{{ missingItems.map((i) => i.label).join('、') }}
-          </span>
-          <button class="btn ghost sm" @click="openAux('settings')">去设置</button>
-        </div>
+        <!-- 配置没配完时不再单独占一条横幅：那句话搬到主按钮上
+             （"还差 2 步：姓名 · API Key"，点它直接去设置）。
+             首启引导本来就该长在"现在该做什么"上，而不是常驻一块地方。 -->
 
         <div v-if="!comAvailable && route === 'main'" class="result warn">
           <div class="head"><span class="ico">!</span>本机缺少 PS 自动化组件</div>
           <div>未检测到 pywin32，无法调用 Photoshop。请安装依赖后重启客户端。</div>
+        </div>
+
+        <!-- 装没装 PS 是运行时才知道的事：识别不到就在这儿说一声，
+             别等员工点完生成才弹一个看不懂的 COM 错误。
+             COM 组件缺失（pywin32）优先报，那条更根本。 -->
+        <div v-else-if="ps && !ps.found && route === 'main'" class="result warn">
+          <div class="head"><span class="ico">!</span>未识别到本机安装的 Photoshop</div>
+          <div>
+            自动识别没找到 Photoshop（任意版本、任意盘符都会找）。请先安装，
+            或到设置里手动指定路径。
+          </div>
+          <button class="btn ghost sm" style="margin-top: 9px" @click="openAux('settings')">去设置</button>
         </div>
 
         <RecordForm
@@ -516,6 +687,8 @@ onUnmounted(() => {
           :templates="templates"
           :partners="partners"
           :ready="!!cfg?.employee_name && !!cfg?.api_key"
+          :missing="missingItems.map((i) => i.short)"
+          :missing-detail="missingItems.map((i) => i.label).join('、')"
           @exported="onExported"
           @busy-change="formBusy = $event"
           @need-settings="openAux('settings')"
@@ -534,6 +707,7 @@ onUnmounted(() => {
           v-else
           :config="cfg"
           :server-ok="serverOk"
+          :ps="ps"
           :templates="templates"
           @saved="onConfigSaved"
           @templates-changed="refreshTemplates"

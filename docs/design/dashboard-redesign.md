@@ -123,7 +123,7 @@ html{kpi, trend, top, table, details[], note, status}
 夜间任务对账步骤、`backup.check_images()` 与 CLI `--check-images`、相关测试。
 `nightly_job` 保留模块级重构（备份/镜像/磁盘三步）。
 
-### 口径（全站唯一定义，在 overview.py 顶部 + 页面底部双公示）
+### 口径（全站唯一定义，在 overview/ 包 __init__ 顶部 + 页面底部双公示）
 
 - 调用次数 = `is_deleted=0` 的**全部**记录，含失败；成功率单独算
 - 业务日 = `work_date`（员工填的工作日期），不是 created_at——补传昨天的记录
@@ -154,7 +154,7 @@ html{kpi, trend, top, table, details[], note, status}
 | `server/app/web/templates/dashboard.html` | 重写：外壳 + 首屏直出 + 时间筛选 |
 | `server/app/web/static/dashboard.js` | 新增：轮询/切范围/展开 |
 | `server/app/web/static/app.css` | 新增概览页组件样式（全走既有变量） |
-| `tests/test_stats_overview.py` | 新增 27 个用例 |
+| `tests/test_stats_overview.py` | 当时新增 27 个用例（现全套 383） |
 
 ## 6. 导航说明
 

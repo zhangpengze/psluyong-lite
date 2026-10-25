@@ -44,6 +44,8 @@ services:
       retries: 3
       start_period: 15s
     deploy:
+      # ⚠ 只能跑 1 份（两份 compose 同款）：日报「今天推过没有」是读—发—写三步、
+      #   中间无锁，两个副本会各推一遍。见 docs/DEPLOY.md §3.4。
       resources:
         limits:
           cpus: "2"

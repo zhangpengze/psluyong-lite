@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -134,7 +135,7 @@ def test_watchdog_exits_when_parent_gone():
     assert not thread.is_alive()
 
 
-def test_watchdog_keeps_quiet_while_parent_alive():
+def test_watchdog_keeps_quiet_while_parent_alive(monkeypatch):
     """父进程还在就别乱退：正常跑着的 sidecar 被自己看门狗杀了才是灾难"""
     exits: list[int] = []
 
@@ -144,6 +145,15 @@ def test_watchdog_keeps_quiet_while_parent_alive():
 
     assert exits == []
     assert thread.is_alive()
+
+    # 收尾必须做：这条线程是"父进程一直活着就一直转"的死循环，不送走的话它会
+    # 每 10ms 调一次 time.sleep 直到整个 pytest 结束——而替身时间的那几个用例
+    # （no_sleep）换掉的正是全局 time.sleep，看门狗的 0.01 会被记进它们的账上，
+    # 于是随机红一条跟它毫无关系的用例（真在 test_ps_connector 上红过：
+    # 断言"第一次退避 0.5 秒"读到了 0.01）。把 alive 判死让它自己退出即可。
+    monkeypatch.setattr(parent_watch, "alive", lambda _pid: False)
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "看门狗线程不许漏到别的用例里"
 
 
 def test_on_lost_failure_still_exits():
@@ -159,3 +169,14 @@ def test_on_lost_failure_still_exits():
     thread.join(timeout=5)
 
     assert exits == [0]
+
+
+def test_no_watchdog_thread_is_left_running():
+    """跳出本文件时不许还有看门狗在转。
+
+    它每 10ms 调一次 `time.sleep`，而这个函数是**全局**的：别处用例把它换成
+    记录器（no_sleep）时，漏下的看门狗会把 0.01 记到别人的账上，于是红一条
+    与该用例毫无关系的断言。这条把"漏"本身钉死，不必再靠运气复现。
+    """
+    leaked = [t.name for t in threading.enumerate() if t.name == "parent-watch"]
+    assert leaked == [], f"还有 {len(leaked)} 条看门狗线程在跑，用例没收尾"

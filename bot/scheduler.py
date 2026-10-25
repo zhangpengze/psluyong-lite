@@ -84,7 +84,12 @@ def start_scheduler(app) -> None:
 
     from bot.qqbot_sender import config_problem
     from bot.report import push_ops_alert, run_daily
+    from bot.single_instance import warn_if_duplicate
     from server.app.config import Config
+
+    # 两份服务同时跑 → 日报各推一遍。只报警，不阻止启动：这条约束靠部署
+    # 文档守（docs/DEPLOY.md「必须单进程运行」），代码只负责让它别悄悄发生。
+    warn_if_duplicate()
 
     def job() -> None:
         try:

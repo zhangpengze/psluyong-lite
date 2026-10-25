@@ -56,6 +56,10 @@ services:
       retries: 3
       start_period: 15s
     deploy:
+      # ⚠ 只能跑 1 份：日报的「今天推过没有」是读标记—发消息—写标记三步、中间无锁，
+      #   两个副本同时到 18:00 会各推一遍一模一样的日报（夜间备份/图片镜像同理）。
+      #   不要加 replicas，也不要 --scale。真要扩副本先做锁选主，见 docs/DEPLOY.md §3.4；
+      #   启动时会检测多副本并在日志/仪表盘上报警（只报警，不拦启动）。
       resources:
         limits:
           cpus: "2"

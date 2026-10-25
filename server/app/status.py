@@ -98,7 +98,14 @@ def _db_file() -> Path | None:
 
 def _service_row() -> dict:
     # 页面能渲染出来，服务就是活的——这行不是摆设，是给"重启后多久了"一个答案
-    return {"status": STATUS_OK, "detail": _uptime_text()}
+    from bot.single_instance import describe
+
+    uptime = _uptime_text()
+    single, note = describe()
+    if single:
+        return {"status": STATUS_OK, "detail": uptime}
+    # 多副本：页面还能用，但日报会重复推——黄点提醒，别用红点当事故吓人
+    return {"status": STATUS_WARN, "detail": f"{uptime} · {note}"}
 
 
 def _database_row() -> dict:

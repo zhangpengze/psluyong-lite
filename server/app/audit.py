@@ -22,7 +22,9 @@ ACTION_LABELS = {
     "export_csv": "导出 CSV",
     "push_report": "重推日报",
     "run_report": "生成日报",
-    "bot_command": "群内指令",
+    # 群内指令已随 NapCat 一起删除，但历史库里还有 bot_command 的行——
+    # 留着这条映射，老的审计记录在页面上才显示成人话而不是一个裸 key。
+    "bot_command": "群内指令（已下线）",
     "login": "登录成功",
     "login_failed": "登录失败",
     "login_blocked": "登录被限流",

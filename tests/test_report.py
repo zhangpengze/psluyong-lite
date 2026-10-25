@@ -1,4 +1,4 @@
-"""日报推送测试：不连真 NapCat，mock requests.post 验证重试/跳过/状态落盘"""
+"""日报推送测试：不连真机器人，用 conftest 的假接口验证重试/跳过/状态落盘"""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-import requests
 
+from bot import qqbot_sender
 from bot import report as report_mod
 from server.app.config import Config
 
@@ -18,7 +18,7 @@ def isolated_data_dir(monkeypatch, tmp_path):
     """把落盘根目录指到本用例的 tmp。
 
     run_daily 会往共享 DATA_DIR/reports 写 .md/.status.json，污染
-    test_bot_handler 对「纯查询不落盘」的断言——子集/随机顺序下会红。
+    别的用例对「只生成不落盘」的断言——子集/随机顺序下会红。
     """
     import server.app.config as config_mod
 
@@ -26,139 +26,69 @@ def isolated_data_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
-class _Resp:
-    """假响应。json_body 为 None 时 .json() 抛 ValueError，模拟"不是 JSON"。
-
-    必须支持 body：OneBot 的失败语义在响应体里，只给 status_code 的假对象
-    会让"HTTP 200 但 body 失败"这类真事故永远测不出来。
-    """
-
-    def __init__(self, status_code: int, text: str = "", json_body=None):
-        self.status_code = status_code
-        self.text = text
-        self._json = json_body
-
-    def json(self):
-        if self._json is None:
-            raise ValueError("Response is not JSON")
-        return self._json
-
-
-@pytest.fixture
-def napcat_cfg(monkeypatch):
-    """配好一套假 NapCat；重试间隔压成 0 让测试不真睡"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
-    monkeypatch.setattr(Config, "NAPCAT_TOKEN", "test-token")
-    monkeypatch.setattr(Config, "REPORT_GROUP_ID", "123456789")
-    monkeypatch.setattr(report_mod, "PUSH_BACKOFF_S", (0, 0))
-
-
-def _patch_post(monkeypatch, handler):
-    monkeypatch.setattr(requests, "post", handler)
-
-
-def test_push_success_first_try(napcat_cfg, monkeypatch):
-    calls = []
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append((url, headers))
-        return _Resp(200)
-
-    _patch_post(monkeypatch, fake_post)
+def test_push_success_first_try(qqbot):
     ok, msg = report_mod.push_to_group("测试日报内容")
+
     assert ok is True
     assert msg == "推送成功"
-    assert len(calls) == 1
-    url, headers = calls[0]
-    assert url == "http://napcat.test:3000/send_group_msg"
-    assert headers["Authorization"] == "Bearer test-token"
+    assert len(qqbot.sent) == 1
+    assert qqbot.headers[0]["Authorization"] == "QQBot test-token"
 
 
-def test_push_retries_then_succeeds(napcat_cfg, monkeypatch):
+def test_push_retries_then_succeeds(qqbot):
     """前两次失败第三次成功：必须重试且最终报成功"""
-    seq = [_Resp(500, "boom"), _Resp(502, "bad gateway"), _Resp(200)]
+    qqbot.refuse_http(500, "boom")
+    qqbot.refuse_http(502, "bad gateway")
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        return seq.pop(0)
-
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("测试日报内容")
+
     assert ok is True, msg
-    assert not seq  # 三次全用掉
+    assert qqbot.send_attempts == 3  # 三次全用掉
 
 
-def test_push_fails_after_all_attempts(napcat_cfg, monkeypatch):
+def test_push_fails_after_all_attempts(qqbot, monkeypatch):
     """一直连不上：重试满 3 次后报失败，消息里带重试次数"""
-    attempts = []
+    import requests
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        attempts.append(url)
-        raise requests.RequestException("connection refused")
+    qqbot.send_raise = requests.RequestException("connection refused")
 
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("测试日报内容")
+
     assert ok is False
-    assert len(attempts) == report_mod.PUSH_ATTEMPTS == 3
+    assert qqbot.send_attempts == qqbot_sender.PUSH_ATTEMPTS == 3
     assert "已重试 3 次" in msg
 
 
-def test_push_ok_http_but_failed_body_is_failure(napcat_cfg, monkeypatch):
-    """HTTP 200 + {"status":"failed"} 必须判失败（真事故形态）
+def test_push_ok_http_but_failed_body_is_failure(qqbot):
+    """HTTP 200 + err_code 必须判失败（真事故形态）
 
-    群号写错 / 机器人被踢出群 / Token 轮换后没同步 / 被风控 / 消息超长，
-    OneBot 全部回 200。以前只看状态码，于是日志、徽标、仪表盘一起绿，
+    群没开「机器人主动在群聊内发言」/ 群 openid 失效 / 机器人被移出群，
+    平台全部回 200。以前只看状态码，于是日志、徽标、仪表盘一起绿，
     群里一条消息都没有，兜底告警也永远不会触发。
     """
-    calls = []
+    qqbot.refuse(40034102, "主动消息失败, 无权限")
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append(url)
-        return _Resp(200, json_body={"status": "failed", "retcode": 100, "message": "GROUP_NOT_FOUND"})
-
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("测试日报内容")
 
-    assert ok is False, "HTTP 200 但 body 说失败，不能报成功"
-    assert "GROUP_NOT_FOUND" in msg and "100" in msg
-    assert len(calls) == 1, "body 里是业务拒绝，重发同样失败，不该重试"
+    assert ok is False, "HTTP 200 但平台拒发，不能报成功"
+    assert "40034102" in msg
+    assert qqbot.send_attempts == 1, "业务拒绝重发同样失败，不该重试"
 
 
-def test_push_ok_http_nonzero_retcode_is_failure(napcat_cfg, monkeypatch):
-    """status 看着正常但 retcode≠0：仍判失败（部分实现只填 retcode）"""
+def test_push_4xx_not_retried(qqbot):
+    """4xx 是请求本身被拒（openid 写错/机器人不在群里），重试只让人晚 20 秒才知道"""
+    qqbot.refuse_http(403, "forbidden")
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        return _Resp(200, json_body={"status": "ok", "retcode": 1404, "msg": "群不存在"})
-
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("x")
 
     assert ok is False
-    assert "1404" in msg and "群不存在" in msg
-
-
-def test_push_4xx_not_retried(napcat_cfg, monkeypatch):
-    """4xx 是请求本身被拒（Token 错/群号写错），重试只会让人晚 20 秒才知道"""
-    calls = []
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append(url)
-        return _Resp(403, "forbidden")
-
-    _patch_post(monkeypatch, fake_post)
-    ok, msg = report_mod.push_to_group("x")
-
-    assert ok is False
-    assert len(calls) == 1
+    assert qqbot.send_attempts == 1
     assert "不重试" in msg
 
 
-def test_run_daily_records_not_pushed_when_body_failed(app, isolated_data_dir, napcat_cfg, monkeypatch):
+def test_run_daily_records_not_pushed_when_body_failed(app, isolated_data_dir, qqbot):
     """推送状态文件必须跟着真实结果走：body 失败就不能写「已推送」"""
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        return _Resp(200, json_body={"status": "failed", "retcode": 1200, "message": "风控拦截"})
-
-    _patch_post(monkeypatch, fake_post)
+    qqbot.refuse(40034102, "主动消息失败, 无权限")
     day = date(2026, 10, 19)
 
     result = report_mod.run_daily(app, day, push=True)
@@ -167,8 +97,9 @@ def test_run_daily_records_not_pushed_when_body_failed(app, isolated_data_dir, n
     status_file = isolated_data_dir / "reports" / "2026-10-19.status.json"
     data = json.loads(status_file.read_text(encoding="utf-8"))
     assert data["pushed"] is False
-    assert "风控拦截" in data["message"]
+    assert "40034102" in data["message"]
     assert Path(result["path"]).exists(), "推送失败不影响日报存档"
+
 
 
 def test_manual_run_without_push_keeps_pushed_badge(admin_client, admin_csrf, isolated_data_dir):
@@ -189,30 +120,24 @@ def test_manual_run_without_push_keeps_pushed_badge(admin_client, admin_csrf, is
     assert data["message"] == "推送成功"
 
 
-def test_push_skipped_when_unconfigured(monkeypatch):
-    """没配 webhook：直接跳过，一次 HTTP 都不发"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "")
+def test_push_skipped_when_unconfigured(qqbot, monkeypatch):
+    """没配机器人：直接跳过，一次 HTTP 都不发"""
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "")
 
-    def fake_post(url, **kwargs):
-        raise AssertionError("未配置时不应发请求")
-
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("x")
     assert ok is False
-    assert "未配置" in msg
+    assert "QQ_BOT_APPID" in msg
+    assert qqbot.urls == []
 
 
-def test_push_skipped_when_no_group_id(napcat_cfg, monkeypatch):
-    """配了 webhook 但没配群号：跳过，不发请求"""
-    monkeypatch.setattr(Config, "REPORT_GROUP_ID", "")
+def test_push_skipped_when_no_group_openid(qqbot, monkeypatch):
+    """配了机器人但没配群 openid：跳过，不发请求"""
+    monkeypatch.setattr(Config, "QQ_BOT_GROUP_OPENID", "")
 
-    def fake_post(url, **kwargs):
-        raise AssertionError("缺少群号时不应发请求")
-
-    _patch_post(monkeypatch, fake_post)
     ok, msg = report_mod.push_to_group("x")
     assert ok is False
-    assert "REPORT_GROUP_ID" in msg
+    assert "QQ_BOT_GROUP_OPENID" in msg
+    assert qqbot.urls == []
 
 
 def test_save_push_status_roundtrip():
@@ -443,40 +368,29 @@ def test_daily_report_unchanged_shape(app, clean_db):
 # ---------- 失败即时告警 ----------
 
 @pytest.fixture
-def alert_cfg(monkeypatch):
-    """配好 NapCat 并清空告警门控"""
+def alert_cfg(qqbot, monkeypatch):
+    """复用假机器人接口，另把告警间隔拉到 300s 并清空门控"""
     report_mod.reset_alert_throttle()
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
-    monkeypatch.setattr(Config, "NAPCAT_TOKEN", "test-token")
-    monkeypatch.setattr(Config, "REPORT_GROUP_ID", "123456789")
     monkeypatch.setattr(Config, "ALERT_MIN_INTERVAL_S", 300)
-    yield
+    yield qqbot
     report_mod.reset_alert_throttle()
 
 
-def test_push_alert_sends_to_group(alert_cfg, monkeypatch):
-    calls = []
+def test_push_alert_sends_to_group(alert_cfg):
+    ok, _ = report_mod.push_alert("⚠️ 录用失败\n员工：张三")
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        calls.append((url, json))
-        return _Resp(200)
-
-    monkeypatch.setattr(requests, "post", fake_post)
-    ok, msg = report_mod.push_alert("⚠️ 录用失败\n员工：张三")
     assert ok is True
-    assert calls[0][0] == "http://napcat.test:3000/send_group_msg"
-    assert calls[0][1]["group_id"] == 123456789
-    assert "录用失败" in calls[0][1]["message"][0]["data"]["text"]
+    assert alert_cfg.urls[-1].endswith("/v2/groups/GROUP_OPENID_TEST/messages")
+    assert "录用失败" in alert_cfg.texts[0]
 
 
-def test_push_alert_throttles_second_call(alert_cfg, monkeypatch):
+def test_push_alert_throttles_second_call(alert_cfg):
     """间隔内第二条告警被抑制——PS 故障批量失败不会刷爆群"""
-    monkeypatch.setattr(requests, "post", lambda url, **kw: _Resp(200))
-
     assert report_mod.push_alert("第一条")[0] is True
     ok, msg = report_mod.push_alert("第二条")
     assert ok is False
     assert "已抑制" in msg
+    assert len(alert_cfg.sent) == 1
 
 
 def test_push_alert_not_swallowed_right_after_boot(alert_cfg, monkeypatch):
@@ -490,7 +404,6 @@ def test_push_alert_not_swallowed_right_after_boot(alert_cfg, monkeypatch):
     from bot import report_alert as alert_mod
 
     monkeypatch.setattr(alert_mod.time, "monotonic", lambda: 5.0)  # 开机 5 秒
-    monkeypatch.setattr(requests, "post", lambda url, **kw: _Resp(200))
     alert_mod.reset_alert_throttle()
 
     ok, msg = report_mod.push_alert("首条告警")
@@ -502,24 +415,21 @@ def test_push_alert_not_swallowed_right_after_boot(alert_cfg, monkeypatch):
     assert "已抑制" in msg2
 
 
-def test_push_alert_skipped_when_unconfigured(monkeypatch):
-    """没配 NapCat：静默跳过，不发请求"""
+def test_push_alert_skipped_when_unconfigured(qqbot, monkeypatch):
+    """没配机器人：静默跳过，不发请求"""
     report_mod.reset_alert_throttle()
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "")
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "")
 
-    def fake_post(url, **kw):
-        raise AssertionError("未配置时不应发请求")
-
-    monkeypatch.setattr(requests, "post", fake_post)
     ok, msg = report_mod.push_alert("x")
     assert ok is False
-    assert "未配置" in msg
+    assert "QQ_BOT_APPID" in msg
+    assert qqbot.urls == []
 
 
-# ---------- 正文长度上限（QQ 单条消息） ----------
-# 伙伴数 × 模板名（200 字符）能轻易把日报撑到上万字符，而 OneBot 对超长文本
-# 是整条拒发（retcode 100）。那种失败会被 P0-1 的 body 校验判成"推送失败"，
-# 于是最忙的那天（数据最多、最该报出去的那天）群里一条消息都没有。
+# ---------- 正文长度上限（单条消息） ----------
+# 伙伴数 × 模板名能轻易把日报撑到上千行，而官方接口对超长内容是整条拒收
+# （err_code）。那种失败会判成"推送失败"，于是最忙的那天（数据最多、最该
+# 报出去的那天）群里一条消息都没有。
 # 处理方式：只截"要发出去的那份"，存档的 .md 永远是全文。
 
 
@@ -563,52 +473,30 @@ def test_clamp_keeps_whole_lines():
         assert line in original, f"截断把一行切坏了：{line!r}"
 
 
-def test_push_sends_the_clamped_text(napcat_cfg, monkeypatch):
+def test_push_sends_the_clamped_text(qqbot):
     """真正发出去的那份必须是截断后的：只算不截等于没做"""
     from bot.report_render import MESSAGE_MAX_BYTES
 
-    sent = []
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        sent.append(json)
-        return _Resp(200)
-
-    _patch_post(monkeypatch, fake_post)
     ok, _ = report_mod.push_to_group(_long_report(300))
 
     assert ok is True
-    text = sent[0]["message"][0]["data"]["text"]
+    text = qqbot.texts[0]
     assert len(text.encode("utf-8")) <= MESSAGE_MAX_BYTES + 200, "还是超了上限"
     assert "已省略" in text
 
 
-def test_run_daily_pushes_clamped_but_archives_full(app, isolated_data_dir, napcat_cfg, monkeypatch):
+def test_run_daily_pushes_clamped_but_archives_full(app, isolated_data_dir, qqbot, monkeypatch):
     """存档是全文、发送是截断——"完整版见后台"这句承诺得是真的"""
     from bot.report_render import MESSAGE_MAX_BYTES
 
     huge = _long_report(300)
     monkeypatch.setattr(report_mod, "render", lambda *a, **k: huge)
-    sent = []
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        sent.append(json)
-        return _Resp(200)
-
-    _patch_post(monkeypatch, fake_post)
     result = report_mod.run_daily(app, date(2026, 10, 24), push=True)
 
     archived = Path(result["path"]).read_text(encoding="utf-8")
     assert archived == huge, "存档必须是全文，否则「完整版见后台」是假的"
-    pushed = sent[0]["message"][0]["data"]["text"]
+    pushed = qqbot.texts[0]
     assert len(pushed.encode("utf-8")) < len(huge.encode("utf-8"))
     assert len(pushed.encode("utf-8")) <= MESSAGE_MAX_BYTES + 200
     assert result["content"] == huge, "接口返回的正文仍应是全文（后台页面要显示它）"
-
-
-def test_clamp_payload_leaves_other_shapes_alone():
-    """形状不对就原样放行：群里发图/at 的调用不走这里，绝不猜"""
-    from bot.report_render import clamp_payload
-
-    payload = {"group_id": 1, "message": [{"type": "image", "data": {"file": "x.jpg"}}]}
-
-    assert clamp_payload(payload) == (payload, 0)

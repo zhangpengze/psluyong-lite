@@ -118,14 +118,14 @@ compose 里已经写好 `logging: max-size 10m / max-file 3`。缺了这段，js
 
 #### 3.3 运维告警
 
-以下四类问题原来只写日志（日志一轮转就消失），现在会推到 `REPORT_GROUP_ID`：
+以下四类问题原来只写日志（日志一轮转就消失），现在会推到日报群：
 
 | 场景 | 触发 |
 |---|---|
 | 数据库备份失败 | 夜间任务异常 |
 | 图片镜像失败 | 单张复制失败或目录不可写 |
 | 图片占用超阈值 | 超过 `DISK_ALERT_GB` |
-| 定时日报推送失败 | 配了 NapCat 但推送未成功 |
+| 定时日报推送失败 | 配了机器人但推送未成功 |
 
 ```bash
 # .env
@@ -303,72 +303,76 @@ npm run tauri:build
 
 ---
 
-## 三、QQ 群日报（NapCat）
+## 三、QQ 群日报（官方机器人）
 
-### 1. 部署 NapCat（UGOS Pro 项目 Compose）
+### 0. 为什么是官方机器人，不是"登录一个 QQ 号"
 
-镜像用社区维护的 `mlikiowa/napcat-docker`。端口：3000=OneBot HTTP、
-6099=WebUI。宿主机 3000 容易被其他服务占用，HTTP 映射到 **13000**。
+老版本用 NapCat（第三方协议端，登录一个真实 QQ 号当机器人）。2026-10 整体换成
+QQ 开放平台的官方机器人，原因不是技术偏好：
 
-「文件管理」在 docker 共享文件夹下新建 `napcat/`，【Docker】应用 →
-【项目】→【创建】，项目目录选该文件夹，粘贴：
+- **授权**：NapCat 的 README 明确禁止未经作者授权的衍生分发，而我们把它打进
+  NAS 安装包＝在分发，这件事没有授权依据；
+- **风险**：真号登录态存在容器里（`./QQ` 目录），WebUI 的 6099 端口是真号的操作台，
+  账号被风控/被封的成本是"一个真 QQ 号"；
+- **能力**：官方通道对群主动消息的额度是**已认证 60 条/分钟、1000 条/天/群**，
+  我们一天十条都不到，完全够用。
 
-```yaml
-services:
-  napcat:
-    image: mlikiowa/napcat-docker:latest
-    container_name: napcat
-    restart: always
-    ports:
-      - "13000:3000"   # OneBot HTTP（勿占宿主机 3000）
-      - "6099:6099"    # WebUI 管理界面
-    volumes:
-      - ./QQ:/app/.config/QQ          # QQ 登录态，删了要重扫
-      - ./config:/app/napcat/config   # NapCat 配置（OneBot 开关在这里）
-    environment:
-      - NAPCAT_UID=0
-      - NAPCAT_GID=0
-      - TZ=Asia/Shanghai
-```
+代价是**没有了"群里发指令回日报"**（第 5 节）：官方平台只投递 @机器人 的消息事件，
+做不到"监听全群关键词"，这个功能已随 NapCat 一起删除。
 
-拉镜像慢的话先配第一节的镜像加速。
+### 1. 在开放平台创建机器人
 
-### 2. 登录 QQ 并开启 HTTP 服务端
+1. 浏览器打开 <https://q.qq.com>，手机 QQ 扫码登录 → 选「个人」主体 → 完成实名认证；
+2. 「创建机器人」，填名称/简介（头像可跳过）；
+3. 进「开发设置」→「开发配置」，复制 **AppID** 和 **AppSecret**。
+   ⚠ AppSecret **只显示一次**，丢了只能重置（旧值立刻失效）；
+4. **IP 白名单**：填 NAS 的**出口公网 IP**（在 NAS 上 `curl ifconfig.me` 查）。
+   不填会一直报「该机器人去火星了，稍后再试吧」；
+5. 把机器人**拉进目标群**（个人认证的机器人可以加进你是群主/管理员的群）；
+6. **手机 QQ → 该群 → 右上角设置 → 机器人 → 打开「机器人主动在群聊内发言」**。
+   这个开关不打开，日报永远发不出去（服务端回 `40034102 主动消息失败, 无权限`）。
 
-1. 容器起来后执行 `docker logs napcat`：日志最顶部有 WebUI 的 Token
-   （在登录二维码上方）。浏览器开 `http://NAS的IP:6099`，用这个 Token 进 WebUI。
-2. 手机 QQ 扫码登录。**建议用小号**——电脑端 QQ 会被挤下线。
-3. **关键一步**：WebUI →「网络配置」→ 新建/启用 **HTTP 服务端**，
-   端口 3000，并设一个鉴权 Token。这个 Token 就是下面 `.env` 里的
-   `NAPCAT_TOKEN`——注意它和 WebUI Token 是两套，可以设成不一样。
-4. 把该 QQ 号拉进目标群。
+### 2. 取群的 `group_openid`（不是群号）
 
-### 3. 对接 psluyong-lite
+官方接口发群消息用的是 `group_openid`——一串只有从**事件**里才能拿到的字符串，
+把群号 `123456789` 填进去只会拿到 `40054002`。
 
-`.env` 里补上（用 NAS 的局域网 IP——UGOS 的 Docker 项目之间用容器名
-解析不到，别写 `http://napcat:3000`）：
+两种拿法，任选一种：
+
+- **手动**：机器人进群后，在群里 @ 它说一句话，服务端日志里
+  `GROUP_AT_MESSAGE_CREATE` 事件带的那串 `group_openid` 就是它；
+- **自动**：`python scripts/qqbot_spike.py`（脚本会连 WebSocket 抓第一条群事件，
+  并把建议写进 `.env` 的那一行直接打出来）。
+
+### 3. 配置 .env
 
 ```bash
-NAPCAT_WEBHOOK=http://192.168.x.x:13000   # NAS 的 IP + 第一步映射的端口
-NAPCAT_TOKEN=HTTP 服务端的 Token
-REPORT_GROUP_ID=123456789                 # 目标 QQ 群号
+QQ_BOT_APPID=<第 1 步的 AppID>
+QQ_BOT_SECRET=<第 1 步的 AppSecret>
+QQ_BOT_GROUP_OPENID=<第 2 步拿到的 openid>
 DAILY_REPORT_HOUR=18
 DAILY_REPORT_MINUTE=0
 ENABLE_SCHEDULER=1
 ```
 
-IP 在 控制面板 → 网络设置 → 网络连接 查看。改完重启容器：
+三项缺任何一项都不会报错：日报照常生成存档，只是不推送，仪表盘那一行显示
+灰色「未配置（缺少 XXX）」——"没配"和"配了推失败"在页面是两种颜色，别混。
+
+改完重启容器：
 
 ```bash
 docker compose up -d
 ```
+
+> 从老版本升级：把 `.env` 里的 `NAPCAT_WEBHOOK` / `NAPCAT_TOKEN` / `REPORT_GROUP_ID`
+> 三行删掉，**并停掉 napcat 容器**——它存着一个真 QQ 的登录态，留着就是风险点。
 
 ### 4. 验证与补推
 
 1. 管理员登录后台 →「每日日报」页。每条日报左侧有推送徽标：
    **已推送**（绿）/ **未推送**（红）/ **已推送·终版**（绿）。
 2. 选中任意一天，点右上角「**重推此日报**」立即补推，徽标实时更新——
-   联调 NapCat 就用这个按钮，不用敲命令。
+   联调就用这个按钮，不用等 18:00。
 3. 定时任务每天 `DAILY_REPORT_HOUR:MINUTE` 自动生成并推送。
 
 **18:00 的快报和次日的终版是两件事**，别把两条消息当成重复推送：
@@ -389,64 +393,22 @@ docker compose up -d
 |---|---|---|
 | 群里只有 18:00 那条，没有终版 | 数据没变化（正常） | 不用管 |
 | 第二天中午了，既没终版也没告警 | 容器在 08:30 之前被重启过、或 `ENABLE_SCHEDULER=0` | 看容器日志有无「日报终版巡检」；手动点「重推此日报」 |
-| 收到「有 N 天日报没推送成功」告警 | 那几天 NapCat 不通或服务停机 | 按告警里的日期逐个重推 |
-| 仪表盘日报一行 18:00 后立刻变黄 | 当天该推的还没推成功 | 查 NapCat：`docs/DEPLOY.md` 三.7 的排障命令 |
+| 收到「有 N 天日报没推送成功」告警 | 那几天推送不通 | 按告警里的日期逐个重推 |
+| 仪表盘日报一行 18:00 后立刻变黄 | 当天该推的还没推成功 | 查第四节排障表 |
 
-### 5. 群内指令（可选）：群里发指令自动回日报
+### 5. 群内指令：已移除
 
-不想等每天定时推送，可以在群里发指令，机器人**私聊**回复触发者
-（不推群、不刷屏；私聊失败才 fallback 发回**触发所在的那个群**）。
+老版本支持"群里发「汇总」→ 机器人私聊回当天日报"。官方平台**只投递 @机器人
+的消息事件**，监听全群关键词在架构上做不到，所以这个功能连同 `/api/v1/bot/onebot`
+回调端点、QQ/群白名单、回调密钥一起删除了。
 
-> **2026-10-24 起默认 fail-closed**：没配 `BOT_CALLBACK_SECRET` 时回调一律 403，
-> 没配 `BOT_ADMIN_QQ_IDS` 时谁都不能触发。老部署升级后指令会"突然不理人"，
-> 按下面第 2 步补两个键再重启即可。这个端点匿名可达等于把含员工姓名/稿件
-> 标题/失败原因的报表对任何能碰到 NAS 端口的人开放。
-
-1. NapCat WebUI →「网络配置」→ 新建/启用 **HTTP 上报**（反向 post）：
-   - 上报地址 `http://<NAS局域网IP>:8080/api/v1/bot/onebot`
-   - 勾选**群消息**上报，心跳/通知类不用开（开了也会被前置过滤，但白占带宽）
-   - 请求头加 `X-Bot-Secret: <你的密钥>`（与 `BOT_CALLBACK_SECRET` 同一个值）
-2. `.env` 补上：
-
-```bash
-# 允许触发指令的 QQ 号，逗号分隔。**留空 = 谁都不能用**（不是"不限制"）
-BOT_ADMIN_QQ_IDS=10001,10002
-# 允许触发指令的群号，逗号分隔。留空 = 只允许 REPORT_GROUP_ID 那个群
-BOT_ALLOWED_GROUP_IDS=
-# 回调校验密钥，与 NapCat 上报请求头 X-Bot-Secret 保持一致。留空 = 拒绝所有回调
-BOT_CALLBACK_SECRET=
-# 逃生阀：仅完全隔离的内网/本机调试才设 1（允许无密钥回调，会打 warning）
-BOT_ALLOW_INSECURE=0
-# 同一人触发冷却秒数，防连点
-BOT_COOLDOWN_S=10
-```
-
-3. 重启 `docker compose up -d`，在群里发指令即可。
-
-**排障：指令没反应**，按顺序查：
-1. `docker logs psluyong-lite | grep 机器人回调` —— 出现「被拒绝（密钥缺失或不匹配）」
-   就是 secret 没对上（NapCat 请求头 vs `.env`）；
-2. 出现「非授权群的触发已忽略」——群号没进 `BOT_ALLOWED_GROUP_IDS`，且不等于 `REPORT_GROUP_ID`；
-3. 出现「白名单外的触发已忽略」——QQ 号没进 `BOT_ADMIN_QQ_IDS`；
-4. 完全没有日志——NapCat 的上报地址/勾选项没配对。
-
-指令集（精确匹配，多说一个字都不触发，避免正常聊天被误触发）：
-
-| 指令 | 回复 |
-|---|---|
-| `汇总` / `日报` / `数据汇总` | 当天日报 |
-| `汇总 昨天` / `前天` / `今天` | 指定某天日报 |
-| `汇总 MM-DD` / `汇总 YYYY-MM-DD` | 指定日期日报 |
-| `汇总 本周` / `本月` / `上周` | 区间汇总（带「按日」拆分） |
-| `帮助` / `指令` | 指令列表 |
-
-日期参数无法识别时（如 `汇总 乱码`）也回帮助文案。每次触发在后台
-「操作日志」留一条 `群内指令` 流水（actor=QQ 号，可追溯谁触发过）。
+要看报表：后台「每日日报」页可以直接选任意日期查看/重推；或者用系统通知里的
+那几条运维告警。
 
 ### 6. 失败即时告警
 
-录用失败**立刻**推到 `REPORT_GROUP_ID`，不等当天日报——失败意味着员工
-白跑一趟 PS，越早止损越好。
+录用失败**立刻**推到日报群，不等当天日报——失败意味着员工白跑一趟 PS，
+越早止损越好。
 
 ```bash
 ALERT_ON_FAILURE=1       # 1=开 0=关
@@ -454,21 +416,27 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 ```
 
 告警内容：员工/模板/稿件/失败原因/时间。推送失败不影响记录本身
-（记录已落库，只是通知不到）。
+（记录已落库，只是通知不到，本地 `data/logs/ops-alerts.jsonl` 仍有流水）。
 
 ### 7. 失败行为与排障
 
-- **自动重试**：推送失败会重试 3 次（间隔 5s / 15s），仍失败则徽标
-  显示「未推送」。日报正文始终存档不丢，随时可以重推。
-- **徽标一直「未推送」但手动能推成功** → 到点那一刻 NapCat 没在跑。
-  确认 napcat 容器 `restart: always` 且 NAS 已开机自启。
-- **推送返回 HTTP 401/403** → `NAPCAT_TOKEN` 填错了，必须是 HTTP
-   服务端的 Token，不是 WebUI 的。
-- **接口通但群收不到** → 机器人不在群里，或 `REPORT_GROUP_ID` 填错。
-- **完全没配 NapCat 时**：不报错，日报照常生成存档，只是不推送——
-  可以先跑通主链路，机器人事后再接。
+- **自动重试**：网络抖动 / 5xx 会重试 3 次（间隔 5s / 15s），仍失败则徽标
+  显示「未推送」，并把原因写进当天的 `status.json`。日报正文始终存档不丢。
+  **4xx 和业务错误码不重试**——重发同样失败，只会让人晚 20 秒才知道。
+- **access_token**：2 小时有效，进程内缓存并在过期前 60 秒自动换新；
+  收到 401 会立刻丢缓存重取一次。
 
----
+错误码对照表（都在 `data/reports/<日期>.status.json` 的 `message` 里）：
+
+| 报错 | 含义 | 处置 |
+|---|---|---|
+| `40034102 主动消息失败, 无权限` | 群里没开「机器人主动在群聊内发言」 | 手机 QQ 群设置 → 机器人 → 打开该开关 |
+| `40013` / HTTP 401 | AppID/AppSecret 错或已重置 | 到 q.qq.com 重新复制，改 `.env` 后重启 |
+| `40054002` / HTTP 404 | `QQ_BOT_GROUP_OPENID` 填成了群号或已失效 | 按第 2 节重新取 openid |
+| `11244` / HTTP 429 | 触发频率限制（60 条/分钟、1000 条/天/群） | 等一分钟；超了通常是有人在刷「重推」 |
+| 「该机器人去火星了」 | 出口 IP 不在白名单 | q.qq.com 后台补 IP 白名单 |
+| 「连不上」/超时 | NAS 出不了网或 DNS 有问题 | 容器内 `curl -I https://api.bot.qq.com` |
+| 完全没配机器人 | 三项没填齐 | 正常的「只生成不推送」，仪表盘灰点 |
 
 ## 四、上线检查清单
 
@@ -506,9 +474,10 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 - [ ] 运维告警能收到：手动删掉一个备份文件后跑一次 `python -m server.backup` 验证
 - [ ] 后台「操作日志」页能看到本次登录记录
 - [ ] `ENABLE_SCHEDULER=1`，且「每日日报」页能看到当天日报
-- [ ] NapCat 已部署，HTTP 服务端 Token 已填进 `NAPCAT_TOKEN`
+- [ ] 机器人已创建，`QQ_BOT_APPID` / `QQ_BOT_SECRET` / `QQ_BOT_GROUP_OPENID` 三项已填
+- [ ] 群设置里已打开「机器人主动在群聊内发言」（否则 40034102）
+- [ ] 开放平台 IP 白名单已填 NAS 的出口公网 IP（否则「该机器人去火星了」）
 - [ ] 后台点「重推此日报」，QQ 群收到且徽标变「已推送」
-- [ ] 配了群内指令：NapCat 上报地址指向 `/api/v1/bot/onebot`，群里发「汇总」私聊能收到
 - [ ] 上线前已记录本次镜像 tag：`docker images psluyong-lite`（回滚要用，见第五节）
 - [ ] **每月一次恢复演练**：`docker exec psluyong-lite python -m server.backup --restore <最近一份备份文件> --rehearse` 输出「彩排通过」且打印各表行数——只校验不落盘，练的是"备份真的能恢复"（步骤见第五节 5.3）
 - [ ] **员工手册已发到每个人手上**（[员工手册.md](员工手册.md)），并确认他们知道「设置 → 高级 → 导出诊断包」在哪
@@ -646,13 +615,13 @@ docker compose restart server
 | 运行身份 | `USER appuser`（1000），最小权限 | `user: "0:0"` + 启动时 `chmod -R 777 /app/data` | **功能性差异保留**——NAS 挂载目录属主不一定是 1000，root+777 是挂载属主权宜。**风险**：容器内任何进程可改写全部数据，文件权限形同虚设。**改进路径**：NAS 文件管理把 `data` 目录属主改为 1000:1000 后，删掉 NAS compose 的 `user:` 与 `command:` 两行即回到最小权限 |
 | 数据卷 | `./server/data:/app/data` | `./data:/app/data` | 功能性差异保留（zip 根目录即项目目录，目录结构不同） |
 | ENABLE_SCHEDULER | `${ENABLE_SCHEDULER:-1}`（environment 显式声明） | 原先缺失 → **已补齐同款一行** | **真漂移已修复**。核实结论：`Config.ENABLE_SCHEDULER` 缺省为 1、打包出的 `.env` 也带 `ENABLE_SCHEDULER=1`，所以此前 NAS 日报并不会不跑——但缺键只是巧合兜底，两份 compose 必须同款显式声明，改默认值时才不会只影响一边 |
-| extra_hosts | 无 | `host.docker.internal:host-gateway`（容器内访问宿主机 13000 的 NapCat） | 功能性差异保留；根 compose 的 NapCat 走局域网 IP（见第三节 3） |
+| extra_hosts | 无 | 无 | **已收敛**：NapCat 桥接删除后两边都不再需要访问宿主机 |
 | 镜像 tag | `psluyong-lite:${PSLUYONG_IMAGE_TAG:-latest}` | 同左 | **已收敛为同款**（原两处写死 `latest`，即 B7） |
 | 日志限流 / 资源限制 | json-file 10m×3 / 2 核 1G | 同左 | 一致，无漂移 |
 
 ## 七、密钥轮换（泄露响应）
 
-`.env` 里四个值一旦泄露（截图、误提交、交接不清），按下面顺序换，**换完必须重启生效**。
+`.env` 里这几个值一旦泄露（截图、误提交、交接不清），按下面顺序换，**换完必须重启生效**。
 2026-10-24 的真实事故就是这么处理的：`.env.bak.ci`（复现「CI 没有 .env」时的备份）被
 `git add -A` 带进提交并推到公开仓库；即使 force-push 重写历史，旧提交 SHA 在 GitHub 上
 仍能被直接访问——**删除历史不等于止血，轮换才是**。
@@ -662,7 +631,7 @@ docker compose restart server
 | `SECRET_KEY` | 登录 session 签名 | 全员重新登录，无其它影响。最先换这个 |
 | `API_KEY` | 员工客户端提交记录 | **每台员工机的客户端配置都要同步改**，否则提交 401 |
 | `ADMIN_PASSWORD` | 主管后台登录 | 见下方「注意」：改 `.env` 不会改已有管理员密码，必须走 `reset-password` |
-| `NAPCAT_TOKEN` | 机器人推送鉴权 | **必须同时在 NapCat「网络配置 → HTTP 服务端」改成一致的值**，否则推送 401 |
+| `QQ_BOT_SECRET` | 官方机器人鉴权（唯一出口） | **不能本地生成**：去 q.qq.com 后台重置 AppSecret，粘回 `.env` 再重启。旧值立刻失效 |
 
 生成新值（任意 Python 3 环境）：
 
@@ -693,11 +662,12 @@ docker compose up -d
 只换其中几项、暂时不动 `API_KEY`（避免逐台跑员工机）：
 
 ```bash
-python scripts/rotate_secrets.py --keys SECRET_KEY,ADMIN_PASSWORD,NAPCAT_TOKEN
+python scripts/rotate_secrets.py --keys SECRET_KEY,ADMIN_PASSWORD
 ```
 
-跑完按屏幕最后那段清单去改 NapCat 与员工客户端即可。**脚本不会替你重启服务、
-也不会替你改 NapCat 和客户端的配置**——这三件仍然要人手做。
+跑完按屏幕最后那段清单去改员工客户端即可。**脚本不会替你重启服务、也不会替你
+改客户端的配置**——这两件仍然要人手做。`QQ_BOT_SECRET` 不在脚本管辖范围内
+（见上表：它只能去平台重置）。
 
 ### 手工换法（脚本不可用时）
 
@@ -707,7 +677,7 @@ docker compose down
 cp .env /volume1/备份/.env.bak.$(date +%Y%m%d)
 
 # 2. 改 .env 里对应四行（绿联文件管理默认隐藏 . 开头文件，需先开「显示隐藏文件」）
-#    SECRET_KEY= / API_KEY= / ADMIN_PASSWORD= / NAPCAT_TOKEN=
+#    SECRET_KEY= / API_KEY= / ADMIN_PASSWORD=
 
 # 3. 起服
 docker compose up -d
@@ -726,8 +696,8 @@ curl -fsS http://127.0.0.1:8000/health/ready
 
 改了 `API_KEY` 后，每台员工机：客户端「设置 → 服务端」的 API Key 填新值 → 保存 → 提交一条
 测试记录确认不再 401。漏改的机器会持续提交失败并堆在客户端离线队列里，补传时依旧 401——
-**API_KEY 要么不换，要换就一次换干净**。短期无法逐台更新时，先只换 `SECRET_KEY`、
-`ADMIN_PASSWORD`、`NAPCAT_TOKEN`，把 `API_KEY` 排到下次上门维护。
+**API_KEY 要么不换，要换就一次换干净**。短期无法逐台更新时，先只换 `SECRET_KEY` 与
+`ADMIN_PASSWORD`，把 `API_KEY` 排到下次上门维护。
 
 ### 事故后的额外动作
 

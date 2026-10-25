@@ -66,6 +66,16 @@ def ops_alerts(monkeypatch):
     return captured
 
 
+def _configure_bot(monkeypatch) -> None:
+    """把"机器人已配好"摆齐。
+
+    调度器只在**配了推送通道**时才为"推失败"告警：没配的干净部署天天报红是噪音。
+    """
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "appid")
+    monkeypatch.setattr(Config, "QQ_BOT_SECRET", "secret")
+    monkeypatch.setattr(Config, "QQ_BOT_GROUP_OPENID", "GROUP_OPENID_TEST")
+
+
 def _cron_hm(trigger) -> tuple[str, str]:
     """CronTrigger 的 (hour, minute) 字符串表达，如 ("18", "0")"""
     vals = {f.name: str(f) for f in trigger.fields}
@@ -163,7 +173,7 @@ def test_daily_job_runs_report_and_stays_quiet(app, backend, ops_alerts, monkeyp
 
 def test_daily_job_alerts_when_configured_but_push_failed(app, backend, ops_alerts, monkeypatch):
     """配了机器人却推送失败 → 必须推群告警（后台徽标没人天天点开看）"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
+    _configure_bot(monkeypatch)
     monkeypatch.setattr(report_mod, "run_daily",
                         lambda *a, **k: {"pushed": False, "message": "已重试 3 次",
                                          "date": "2026-10-21", "path": "x"})
@@ -173,12 +183,12 @@ def test_daily_job_alerts_when_configured_but_push_failed(app, backend, ops_aler
     assert ops_alerts == [("定时日报未推送成功", "日期 2026-10-21｜已重试 3 次")]
 
 
-def test_daily_job_stays_quiet_when_webhook_unconfigured(app, backend, ops_alerts, monkeypatch):
+def test_daily_job_stays_quiet_when_bot_unconfigured(app, backend, ops_alerts, monkeypatch):
     """没配推送通道时不告警——同一通道本来就发不出去，告警只会堆日志"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "")
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "")
     monkeypatch.setattr(report_mod, "run_daily",
                         lambda *a, **k: {"pushed": False,
-                                         "message": "未配置 NAPCAT_WEBHOOK，跳过推送",
+                                         "message": "未配置 QQ_BOT_APPID / QQ_BOT_SECRET，已跳过推送",
                                          "date": "2026-10-21", "path": "x"})
     sched = _start(app, backend)
     _run_daily_job(sched)
@@ -226,7 +236,7 @@ def test_patrol_job_quiet_on_success(app, backend, ops_alerts, monkeypatch):
 
 def test_patrol_job_quiet_when_nothing_changed(app, backend, ops_alerts, monkeypatch):
     """内容没变（skipped）：一条消息都没发，不算失败，不该告警"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
+    _configure_bot(monkeypatch)
     monkeypatch.setattr(
         scheduler_mod, "patrol",
         lambda a, today=None: {
@@ -241,18 +251,18 @@ def test_patrol_job_quiet_when_nothing_changed(app, backend, ops_alerts, monkeyp
 
 def test_patrol_job_alerts_when_final_push_failed(app, backend, ops_alerts, monkeypatch):
     """终版补推失败：必须告警（群里缺的就是昨天那份终版）"""
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.test:3000")
+    _configure_bot(monkeypatch)
     monkeypatch.setattr(
         scheduler_mod, "patrol",
         lambda a, today=None: {
             "date": "2026-10-20", "pushed": False, "skipped": False,
-            "message": "推送被 OneBot 拒绝: GROUP_NOT_FOUND", "missing": [],
+            "message": "error_code=40034102 机器人主动发言无权限", "missing": [],
         },
     )
     _run_patrol_job(_start(app, backend))
 
     assert ops_alerts == [
-        ("日报终版补推失败", "日期 2026-10-20｜推送被 OneBot 拒绝: GROUP_NOT_FOUND")
+        ("日报终版补推失败", "日期 2026-10-20｜error_code=40034102 机器人主动发言无权限")
     ]
 
 

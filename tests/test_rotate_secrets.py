@@ -51,9 +51,11 @@ def test_rotate_only_touches_target_keys():
 
 
 def test_rotate_reports_missing_key_instead_of_inventing():
-    _, found, missing = rs.rotate_text(SAMPLE, ["SECRET_KEY", "NAPCAT_TOKEN"], generator=lambda k: "x")
-    assert missing == ["NAPCAT_TOKEN"]
-    assert "NAPCAT_TOKEN" not in found
+    """文件里没有的键：报出来，但绝不能凭空追加一行"""
+    text, found, missing = rs.rotate_text(SAMPLE, ["SECRET_KEY", "NOT_IN_FILE"], generator=lambda k: "x")
+    assert missing == ["NOT_IN_FILE"]
+    assert "NOT_IN_FILE" not in found
+    assert "NOT_IN_FILE" not in text
 
 
 def test_rotate_preserves_trailing_newline():
@@ -106,7 +108,7 @@ def test_rotation_end_to_end(tmp_path, capsys):
 
     code = rs.main([
         "--env-file", str(env),
-        "--keys", "SECRET_KEY,ADMIN_PASSWORD,NAPCAT_TOKEN",
+        "--keys", "SECRET_KEY,ADMIN_PASSWORD",
         "--backup-dir", str(bk),
         "--yes", "--no-db",
     ])
@@ -117,7 +119,7 @@ def test_rotation_end_to_end(tmp_path, capsys):
     assert after["ADMIN_PASSWORD"] != "old-password"
     assert after["TZ"] == "Asia/Shanghai"          # 无关键不动
     assert after["API_KEY"] == "old-api-key"       # 未指定就不换
-    assert "NAPCAT_TOKEN" not in after             # 原文件没有，不强塞
+    assert "NOT_IN_FILE" not in after              # 原文件没有的键永不凭空出现
 
     names = sorted(f.name for f in bk.iterdir())
     assert any(n.startswith("env-backup-") for n in names)

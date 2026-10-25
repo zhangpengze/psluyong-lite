@@ -82,6 +82,7 @@ def start_scheduler(app) -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
+    from bot.qqbot_sender import config_problem
     from bot.report import push_ops_alert, run_daily
     from server.app.config import Config
 
@@ -89,8 +90,9 @@ def start_scheduler(app) -> None:
         try:
             result = run_daily(app, push=True)
             logger.info("定时日报完成: %s", result["message"])
-            # 配了机器人却推送失败，必须让人知道——徽标在后台页里，没人会天天点开看
-            if Config.NAPCAT_WEBHOOK and not result["pushed"]:
+            # 配了机器人却推送失败，必须让人知道——徽标在后台页里，没人会天天点开看。
+            # 没配机器人时不告警：那是"还没接"，不是故障，否则一台干净部署天天报红。
+            if not config_problem(need_group=True) and not result["pushed"]:
                 push_ops_alert(
                     "定时日报未推送成功",
                     f"日期 {result['date']}｜{result['message']}",
@@ -107,7 +109,11 @@ def start_scheduler(app) -> None:
         """
         try:
             result = patrol(app)
-            if Config.NAPCAT_WEBHOOK and not result["pushed"] and not result["skipped"]:
+            if (
+                not config_problem(need_group=True)
+                and not result["pushed"]
+                and not result["skipped"]
+            ):
                 push_ops_alert(
                     "日报终版补推失败",
                     f"日期 {result['date']}｜{result['message']}",

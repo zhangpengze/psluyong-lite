@@ -68,26 +68,18 @@ class Config:
     # 巡检时往前看几天找"没推成功的日报"，只汇总成一条运维告警，
     # 不自动往群里补推（否则一次宕机 5 天，群里会被 5 份旧日报淹没）
     REPORT_MISS_LOOKBACK_DAYS = int(os.getenv("REPORT_MISS_LOOKBACK_DAYS", "7"))
-    NAPCAT_WEBHOOK = os.getenv("NAPCAT_WEBHOOK", "").strip()
-    NAPCAT_TOKEN = os.getenv("NAPCAT_TOKEN", "").strip()
-    REPORT_GROUP_ID = os.getenv("REPORT_GROUP_ID", "").strip()
 
-    # QQ 机器人反向指令（群里发「汇总」→ 私聊回复当天日报）
-    # 白名单：允许触发指令的 QQ 号，逗号分隔。**留空 = 谁都不能用**（fail-closed）。
-    # 2026-10-24 改：原来是"留空=不限制"，与"内网信任边界"叠加后等于——机器人被
-    # 拉进任何群，群里任何人发一句「汇总」就能把含员工姓名/作者/标题/失败原因的
-    # 报表私聊带走。要放宽就显式列出 QQ 号，别靠"留空"表达。
-    BOT_ADMIN_QQ_IDS = os.getenv("BOT_ADMIN_QQ_IDS", "").strip()
-    # 允许触发指令的群号，逗号分隔。留空 = 只允许 REPORT_GROUP_ID 这一个群。
-    # 单独一个键的原因：机器人常同时待在日报群和一个管理群里。
-    BOT_ALLOWED_GROUP_IDS = os.getenv("BOT_ALLOWED_GROUP_IDS", "").strip()
-    # 回调校验密钥：NapCat 上报请求头 X-Bot-Secret 带同一个值才处理。
-    # **留空 = 拒绝所有回调**（fail-closed），旧行为是留空即放行。
-    BOT_CALLBACK_SECRET = os.getenv("BOT_CALLBACK_SECRET", "").strip()
-    # 逃生阀：确实在完全隔离的内网/本机调试时，显式置 1 才允许"无密钥回调"。
-    BOT_ALLOW_INSECURE = os.getenv("BOT_ALLOW_INSECURE", "0") == "1"
-    # 同一人触发指令的冷却秒数，防连点/重复上报
-    BOT_COOLDOWN_S = int(os.getenv("BOT_COOLDOWN_S", "10"))
+    # 官方 QQ 机器人（QQ 开放平台 /v2 OpenAPI）。三个值都在 q.qq.com 后台拿。
+    # 为什么不走"登录一个真 QQ 号"的第三方协议端（NapCat 等）：那是把真号当机器人，
+    # 且 NapCat 的授权明确禁止未经许可的衍生分发——打进安装包就是在分发。
+    QQ_BOT_APPID = os.getenv("QQ_BOT_APPID", "").strip()
+    QQ_BOT_SECRET = os.getenv("QQ_BOT_SECRET", "").strip()
+    # 群的 openid，**不是群号**：它是机器人进群/@ 事件里带的 group_openid，
+    # 填成 123456789 这种群号只会被平台判 40054002。
+    QQ_BOT_GROUP_OPENID = os.getenv("QQ_BOT_GROUP_OPENID", "").strip()
+    # 接口域名。2026-08-10 起官方统一到 api.bot.qq.com（旧 api.sgroup.qq.com 已下线），
+    # 取 access_token 也在同一个域名下；留成可配是为了内网反代/私有网关。
+    QQ_BOT_API_BASE = os.getenv("QQ_BOT_API_BASE", "").strip()
 
     # 失败即时告警：录用失败立刻推群，不等当天日报
     ALERT_ON_FAILURE = os.getenv("ALERT_ON_FAILURE", "1") == "1"
@@ -111,7 +103,7 @@ class Config:
     DISK_ALERT_GB = float(os.getenv("DISK_ALERT_GB", "20"))
 
     # 外部告警开关：备份失败 / 图片镜像失败 / 磁盘超阈值 / 定时日报推送失败时推群。
-    # 复用失败的推送通道（NAPCAT_WEBHOOK），没配就只记日志。
+    # 复用日报的推送通道（QQ_BOT_*），没配就只记日志 + 落本地告警流水。
     ALERT_ON_OPS_FAILURE = os.getenv("ALERT_ON_OPS_FAILURE", "1") == "1"
 
 

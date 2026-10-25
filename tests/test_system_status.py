@@ -155,24 +155,33 @@ def test_stale_backup_is_warn(admin_client, clean_db, sys_dirs):
 
 # ---------- 日报推送分档 ----------
 
-def test_report_off_when_webhook_missing(admin_client, clean_db, sys_dirs, monkeypatch):
-    """没配 NAPCAT_WEBHOOK：灰色"未配置"，不算故障。
+def _configure_bot(monkeypatch) -> None:
+    """摆出"机器人已配好"：只配了这一项之外的用例都靠它"""
+    from server.app.config import Config
+
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "appid")
+    monkeypatch.setattr(Config, "QQ_BOT_SECRET", "secret")
+    monkeypatch.setattr(Config, "QQ_BOT_GROUP_OPENID", "GROUP_OPENID_TEST")
+
+def test_report_off_when_bot_missing(admin_client, clean_db, sys_dirs, monkeypatch):
+    """没配机器人：灰色"未配置"并说明缺哪一项，不算故障。
 
     注意：load_dotenv 会把仓库根目录真实 .env 的值读回来，测试环境默认
     「已配置」，所以这里必须显式置空才能测到未配置分支。
     """
     from server.app.config import Config
 
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "")
+    monkeypatch.setattr(Config, "QQ_BOT_APPID", "")
     rows = _rows(admin_client)
     assert rows["report"]["status"] == "off"
     assert "未配置" in rows["report"]["detail"]
+    assert "QQ_BOT_APPID" in rows["report"]["detail"], "灰点也要说清缺哪一项，否则运维得翻文档"
 
 
 def test_report_pushed_is_ok(admin_client, clean_db, sys_dirs, monkeypatch):
     from server.app.config import Config
 
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.fake/webhook")
+    _configure_bot(monkeypatch)
     _push_status(sys_dirs, pushed=True)
     rows = _rows(admin_client)
     assert rows["report"]["status"] == "ok"
@@ -182,7 +191,7 @@ def test_report_pushed_is_ok(admin_client, clean_db, sys_dirs, monkeypatch):
 def test_report_missing_status_is_warn(admin_client, clean_db, sys_dirs, monkeypatch):
     from server.app.config import Config
 
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.fake/webhook")
+    _configure_bot(monkeypatch)
     rows = _rows(admin_client)
     assert rows["report"]["status"] == "warn"
     assert "没有推送记录" in rows["report"]["detail"]
@@ -191,7 +200,7 @@ def test_report_missing_status_is_warn(admin_client, clean_db, sys_dirs, monkeyp
 def test_report_failed_is_bad_with_reason(admin_client, clean_db, sys_dirs, monkeypatch):
     from server.app.config import Config
 
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.fake/webhook")
+    _configure_bot(monkeypatch)
     _push_status(sys_dirs, pushed=False, message="连接超时")
     rows = _rows(admin_client)
     assert rows["report"]["status"] == "bad"
@@ -203,7 +212,7 @@ def test_report_final_is_marked(admin_client, clean_db, sys_dirs, monkeypatch):
     """出过终版的日报要能看出来（快报 vs 终版，内容不一样，别让人以为推重了）"""
     from server.app.config import Config
 
-    monkeypatch.setattr(Config, "NAPCAT_WEBHOOK", "http://napcat.fake/webhook")
+    _configure_bot(monkeypatch)
     _push_status(sys_dirs, pushed=True, final=True)
     rows = _rows(admin_client)
     assert rows["report"]["status"] == "ok"

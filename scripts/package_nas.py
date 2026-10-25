@@ -53,20 +53,27 @@ README = """# psluyong-lite 服务端（NAS 部署版）
 3. **验证**：容器状态为「运行中」后，浏览器打开 `http://NAS的IP:8080/health/ready`，
    返回 ok 即成功。
 
-## 二、日报推送
+## 二、日报推送（官方 QQ 机器人）
 
-`.env` 里已经配好：
+`.env` 里这三项必须填对，否则日报只生成不推送：
 
-    NAPCAT_WEBHOOK=http://host.docker.internal:13000
-    NAPCAT_TOKEN=<NapCat HTTP 服务端的 Token>
-    REPORT_GROUP_ID=<群号>
-    ENABLE_SCHEDULER=1
+    QQ_BOT_APPID=<q.qq.com 后台的 AppID>
+    QQ_BOT_SECRET=<q.qq.com 后台的 AppSecret>
+    QQ_BOT_GROUP_OPENID=<群的 openid，不是群号>
 
-`host.docker.internal` 由 compose 的 `extra_hosts: host-gateway` 解析到宿主机，
-指向 napcat 映射出来的 13000 端口。**前提：NapCat 的 HTTP 服务端 Host 必须是
-0.0.0.0（不能是 127.0.0.1）且已启用。**
+拿 `QQ_BOT_GROUP_OPENID`：把机器人拉进群，在群里 @ 它说一句话，服务端日志里
+`GROUP_AT_MESSAGE_CREATE` 事件带的 `group_openid` 就是它（也可以用
+`python scripts/qqbot_spike.py` 自动抓）。
+
+**必须做的两件事**（漏了就会一直 40034102 主动消息无权限）：
+1. 手机 QQ 打开该群 → 设置 → 机器人 → 打开「机器人主动在群聊内发言」；
+2. q.qq.com 后台把 NAS 的出口公网 IP 加进机器人 IP 白名单。
 
 验证推送：后台「每日日报」→ 选一天 → 点「重推此日报」，徽标变绿即可。
+
+> 老版本用 NapCat（登录一个真 QQ 号）推群，已整体移除。升级时把 `.env` 里的
+> `NAPCAT_WEBHOOK` / `NAPCAT_TOKEN` / `REPORT_GROUP_ID` 三行删掉，同时把 napcat
+> 容器停掉——它存的是一个真 QQ 的登录态，留着就是个风险点。
 
 ## 三、数据
 
@@ -84,9 +91,11 @@ README = """# psluyong-lite 服务端（NAS 部署版）
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 推送返回 401/403 | Token 与 NapCat 里不一致 | 改 `.env` 的 `NAPCAT_TOKEN`，重启项目 |
-| 推送报「连不上」 | NapCat Host 不是 0.0.0.0 / 未启用 | 回 NapCat WebUI 网络配置检查 |
-| 徽标一直红但手动能推 | 到点那一刻 napcat 容器没跑 | 确认 napcat 项目 `restart: always` |
+| 40034102 主动消息失败, 无权限 | 群里没开「机器人主动在群聊内发言」 | 手机 QQ 群设置 → 机器人 → 打开该开关 |
+| 401 / 40013 | AppID/AppSecret 填错或已重置 | 到 q.qq.com 复制新值改 `.env`，重启项目 |
+| 40054002 group_openid 无效 | 填成了群号 | 按上面第二节的方法取真正的 openid |
+| 11244 频率限制 | 群主动消息 60 条/分钟、1000 条/天 | 等一分钟；超了就是有人在刷重推 |
+| 「该机器人去火星了」 | 出口 IP 不在白名单 | q.qq.com 后台补 IP 白名单 |
 | 员工客户端登录失败 | `API_KEY` 被改过 | `API_KEY` 必须与客户端里填的一致 |
 """
 
@@ -121,10 +130,10 @@ def _render_env(local: dict[str, str]) -> str:
         "ENABLE_SCHEDULER=1",
         "DAILY_REPORT_HOUR=18",
         "DAILY_REPORT_MINUTE=0",
-        "# 容器内访问宿主机上 napcat 的 13000 端口",
-        "NAPCAT_WEBHOOK=http://host.docker.internal:13000",
-        f"NAPCAT_TOKEN={get('NAPCAT_TOKEN')}",
-        f"REPORT_GROUP_ID={get('REPORT_GROUP_ID')}",
+        "# 官方机器人：AppID/AppSecret 在 q.qq.com 后台，openid 从群消息事件里取",
+        f"QQ_BOT_APPID={get('QQ_BOT_APPID')}",
+        f"QQ_BOT_SECRET={get('QQ_BOT_SECRET')}",
+        f"QQ_BOT_GROUP_OPENID={get('QQ_BOT_GROUP_OPENID')}",
         "",
         "# ===== 其他 =====",
         "TZ=Asia/Shanghai",

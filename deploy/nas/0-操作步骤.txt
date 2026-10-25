@@ -20,7 +20,8 @@ cp .env.example .env    （文件管理里复制并重命名即可，注意别�
 必填三项：SECRET_KEY / API_KEY / ADMIN_PASSWORD
     python -c "import secrets;print(secrets.token_urlsafe(48))"   # 生成 SECRET_KEY
     python -c "import secrets;print(secrets.token_urlsafe(32))"   # 生成 API_KEY
-要接日报推送再填：NAPCAT_TOKEN / REPORT_GROUP_ID
+要接日报推送再填：QQ_BOT_APPID / QQ_BOT_SECRET / QQ_BOT_GROUP_OPENID
+    （QQ_BOT_GROUP_OPENID 是群的 openid，**不是群号**，见 docs/DEPLOY.md 第三节）
 不建 .env 就启动会报「env file .env not found」或「环境变量 SECRET_KEY 未设置」——
 这是预期行为，先把 .env 建好。
 
@@ -82,19 +83,25 @@ COPY server ... not found
 env file .env not found / SECRET_KEY 未设置
     → .env 没上传，或存成了 .env.txt（Windows 隐藏扩展名的坑）
 
-推送 401/403
-    → .env 的 NAPCAT_TOKEN 与 NapCat「网络配置 → HTTP 服务端」Token 不一致
+推送 40034102「主动消息失败, 无权限」
+    → 手机 QQ → 该群 → 设置 → 机器人 → 打开「机器人主动在群聊内发言」
 
-推送「连不上」
-    → 把 .env 的 NAPCAT_WEBHOOK 改成 http://NAS的局域网IP:13000，重启项目
+推送 40013 / 401
+    → .env 的 QQ_BOT_APPID / QQ_BOT_SECRET 填错或已在后台重置，去 q.qq.com 重新复制
 
-群不存在 / 无权限
-    → 扫码登录的 QQ 不在 134132323 群里，或群号写错
+推送 40054002 / 404
+    → QQ_BOT_GROUP_OPENID 填成了群号；按 docs/DEPLOY.md 三.2 重新取
+
+「该机器人去火星了，稍后再试吧」
+    → 开放平台的后台没填 NAS 出口公网 IP（IP 白名单）
+
+仪表盘日报一行是灰点「未配置」
+    → 三项 QQ_BOT_* 没填齐，此时日报只生成不推送（不是故障）
 
 七、这台机器是 ARM64
 --------------------
 日志里 wheel 名带 aarch64。以后拉镜像要选有 ARM 版本的，
-否则报 exec format error。python:3.11-slim 与 napcat-docker 都支持。
+否则报 exec format error。python:3.11-slim 支持。
 
 八、备份与安全
 --------------

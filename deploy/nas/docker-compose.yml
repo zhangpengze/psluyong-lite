@@ -1,8 +1,8 @@
 # 绿联 NAS（UGOS Pro）/ 任意 Docker 主机部署 —— 服务端 + 日报推送
 #
-# 与 napcat 是同一个 NAS 上的两个独立项目。两者通过宿主机端口互通：
-# napcat 把容器的 3000 映射到宿主机 13000，
-# 本服务通过 host.docker.internal:13000 访问它（extra_hosts 负责把域名指向宿主机）。
+# 日报走官方 QQ 机器人（https://api.bot.qq.com），只需要容器能出网访问 443，
+# 不再需要连宿主机上的任何服务——老版本的 NapCat 桥接（host.docker.internal:13000）
+# 已随真号登录方案一起删除，extra_hosts 也就不再需要了。
 #
 # 数据全部在 ./data（数据库 / 成品图 / 日报 / 备份），备份这个目录即可。
 #
@@ -38,10 +38,6 @@ services:
       # 成品图镜像目录（容器内路径）。把 NAS 第二块盘/另一台共享目录挂到
       # /app/mirror，这里就填 /app/mirror；留空 = 不镜像（盘坏即丢图）。
       IMAGES_MIRROR_DIR: ${IMAGES_MIRROR_DIR:-}
-    # 让容器内可以解析 host.docker.internal → 宿主机网关，
-    # 从而访问宿主机 13000 上跑的 NapCat HTTP 服务（Linux 上默认没有这个域名）
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
       # 图片镜像目标（可选，配了 IMAGES_MIRROR_DIR=/app/mirror 才需要）

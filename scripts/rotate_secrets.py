@@ -5,7 +5,7 @@
 真正止血只有轮换。手动轮换容易漏三步：① 备份文件又落回仓库里
 （`.env.bak.ci` 就是这么被 `git add -A` 带进公开仓库的）；② 忘了改管理员密码
 在数据库里其实没变（`models.py::init_seed` 只在查无此人时建号）；
-③ 忘了 NapCat / 员工客户端要同步。
+③ 忘了员工客户端要同步。
 
 用法：
     python scripts/rotate_secrets.py                    # 轮换四项，先备份再写
@@ -38,11 +38,15 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = ROOT / ".env"
 
 # 键 -> 生成时的字节数（ADMIN_PASSWORD 要人手输，短一点；其余给足熵）
+#
+# 注意 QQ_BOT_SECRET **不在**这里：它不是本地生成的随机串，而是 q.qq.com 后台
+# 签发、且只显示一次的凭证。脚本编一个新值写进 .env，机器人立刻全部 401，
+# 而脚本还会打印"轮换成功"——这比不轮换更糟。真泄露了要去后台重置 AppSecret
+# 再粘回来（DEPLOY.md 有步骤）。
 ROTATABLE = {
     "SECRET_KEY": 32,
     "API_KEY": 32,
     "ADMIN_PASSWORD": 12,
-    "NAPCAT_TOKEN": 24,
 }
 
 # 每个键改完之后的连带动作，直接打进收尾清单
@@ -50,7 +54,6 @@ SIDE_EFFECTS = {
     "SECRET_KEY": "所有登录 session 失效，后台需重新登录（无其它影响）",
     "API_KEY": "每台员工客户端的 API Key 都要改成新值，否则提交 401",
     "ADMIN_PASSWORD": "数据库里的管理员密码必须一起重置（本脚本默认会做），只改 .env 无效",
-    "NAPCAT_TOKEN": "NapCat「网络配置 -> HTTP 服务端」的 Token 要改成同一个值，否则推送 401",
 }
 
 
@@ -195,7 +198,7 @@ def _parse_keys(raw: str | None) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="轮换 .env 密钥并打印连带动作清单")
     ap.add_argument("--env-file", default=str(DEFAULT_ENV), help="默认 <repo>/.env")
-    ap.add_argument("--keys", default=None, help="逗号分隔，默认全部四项")
+    ap.add_argument("--keys", default=None, help="逗号分隔，默认全部三项")
     ap.add_argument("--backup-dir", default=None, help="默认 $PSLUYONG_ENV_BACKUP_DIR 或系统临时目录")
     ap.add_argument("--username", default=None, help="管理员用户名，默认取 ADMIN_USERNAME 或 admin")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不写文件、不碰数据库")

@@ -1,8 +1,29 @@
-# ADR-001：日报推送的传输层——双通道 fan-out，而不是二选一
+# ADR-001：日报推送的传输层
 
-- **Status**: Proposed (2026-10-25)
-- **决策人**: 待用户确认
+- **Status**: **Superseded（2026-10-25，用户裁决）** —— 下面的「双通道 fan-out」方案**未采纳**
 - **相关**: `docs/decisions/OPEN-DECISIONS.md` 第 1 行、`scripts/qqbot_spike.py`、审计 P1-3 / P1-8
+
+---
+
+## Superseded：实际采用的方案
+
+用户的原话是「**删除之前用 QQ 号登录的逻辑**」。所以最终不是 fan-out，而是**单通道**：
+
+- `bot/handler.py`（群内指令）、`bot/access.py`（双白名单）、
+  `server/app/routes/bot.py`（`/api/v1/bot/onebot` 回调端点）、`tests/test_bot_handler.py`
+  全部删除；
+- `bot/report.py` 里的 `_post_with_retry` / `_verify_onebot_response` / `push_to_user`
+  与 `report_render.clamp_payload`（OneBot 的 `[{type:text}]` 形状）一并删除；
+- 新增 `bot/qqbot_sender.py`：token 缓存（提前 60 秒刷新）+ `/v2/groups/{openid}/messages`
+  + `err_code` 判定 + 错误码翻译 + 3 次退避重试；`report.py` / `report_alert.py` /
+  `scheduler.py` 都只调它；
+- 配置从 `NAPCAT_*` / `BOT_*` / `REPORT_GROUP_ID` 换成
+  `QQ_BOT_APPID` / `QQ_BOT_SECRET` / `QQ_BOT_GROUP_OPENID` / `QQ_BOT_API_BASE`；
+- **群内「汇总」指令不再提供**：官方平台只投递 @机器人 的消息事件，全量关键词触发做不到。
+
+下面保留原始分析（含调研表），因为"为什么不再自己实现 WebSocket""`group_openid` 是
+另一套 id 空间""access_token 有 60 秒窗口"这些结论在实现里全部用上了；被推翻的只有
+"保留 NapCat 作主通道"这一条。
 
 ---
 
@@ -30,7 +51,7 @@
 | **qq-botpy**（腾讯官方 SDK） | `botpy.Client` 子类 + `on_group_at_message_create` + `message._api.post_group_message(group_openid=..., msg_type=0, msg_id=...)`；WS/心跳/重连/intents 全内置 | 生产上**别自己写 WebSocket**；`msg_id` 决定被动回复，不带就是主动消息 |
 | **生态现状** | go-cqhttp 已停止维护；现役 OneBot 实现是 NapCat / LLOneBot / Lagrange。NapCat 基于 NTQQ 二次封装、有 Docker 与 WebUI、风控相对低 | **NapCat 是混合许可证、要求衍生开发获得授权**——我们只是跑官方镜像没改它代码，风险可接受，但升级前必须读 LICENSE |
 
-## Decision
+## Decision（未采纳）
 
 **做双通道 fan-out，不换掉 NapCat。**
 

@@ -10,8 +10,8 @@
 连日志都没有——凌晨最该知道的"图没镜像"就这么没了。同理，日报未推送与备份失败
 撞在同一分钟也不该互相吞。
 
-HTTP 调用复用 report._post_with_retry（重试常量以 report 模块为准，
-测试 monkeypatch report.PUSH_BACKOFF_S 对这里同样生效），故函数内延迟 import。
+HTTP 调用统一走 qqbot_sender.push_to_group（重试常量以那个模块为准，
+测试 monkeypatch qqbot_sender.PUSH_BACKOFF_S 对这里同样生效），故函数内延迟 import。
 """
 
 from __future__ import annotations
@@ -46,22 +46,21 @@ def reset_alert_throttle() -> None:
 
 
 def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, str]:
-    """录用失败即时告警：推到 REPORT_GROUP_ID。
+    """录用失败即时告警：推到日报群。
 
-    未配置 NapCat 时静默跳过（本地开发/未接机器人时不该报错）；
+    没配机器人时静默跳过（本地开发/未接机器人时不该报错）；
     间隔内的重复告警被抑制——失败记录本身已落库，告警只是通知。
     """
     from server.app.config import Config
 
-    from .report import _post_with_retry
+    from .qqbot_sender import config_problem, push_to_group
 
     global _last_alert_at
     interval = Config.ALERT_MIN_INTERVAL_S if min_interval_s is None else min_interval_s
 
-    if not Config.NAPCAT_WEBHOOK:
-        return False, "未配置 NAPCAT_WEBHOOK，跳过告警"
-    if not Config.REPORT_GROUP_ID:
-        return False, "缺少 REPORT_GROUP_ID，跳过告警"
+    problem = config_problem(need_group=True)
+    if problem:
+        return False, f"{problem}，跳过告警"
 
     now = time.monotonic()
     with _alert_lock:
@@ -69,12 +68,7 @@ def push_alert(content: str, min_interval_s: int | None = None) -> tuple[bool, s
             return False, f"告警间隔小于 {interval}s，已抑制"
         _last_alert_at = now
 
-    group_id = Config.REPORT_GROUP_ID
-    payload = {
-        "group_id": int(group_id) if group_id.isdigit() else group_id,
-        "message": [{"type": "text", "data": {"text": content}}],
-    }
-    return _post_with_retry("send_group_msg", payload, "失败告警")
+    return push_to_group(content, description="失败告警")
 
 
 # ========== 运维告警 ==========
@@ -97,9 +91,10 @@ def reset_ops_alert_throttle() -> None:
 def record_local_alert(kind: str, title: str, detail: str, state: str) -> None:
     """本地告警流水：`<DATA_DIR>/logs/ops-alerts.jsonl`。
 
-    为什么群消息之外还要落一份：告警通道就是被监控的 NapCat 本身。
-    NapCat 挂掉时"日报推不出去"这件事永远发不出群消息——最该知道的故障
-    恰好静默。落一份本地文件，运维打开目录就能看到这几天到底报了些什么。
+    为什么群消息之外还要落一份：告警通道本身也可能挂——机器人被平台停用、
+    access_token 取不到、群 openid 失效，这时"日报推不出去"这件事永远发不出
+    群消息，最该知道的故障恰好静默。落一份本地文件，运维打开目录就能看到
+    这几天到底报了些什么。
     """
     try:
         from server.app.config import DATA_DIR
@@ -133,7 +128,7 @@ def push_ops_alert(title: str, detail: str = "", kind: str = "ops") -> tuple[boo
     """
     from server.app.config import Config
 
-    from .report import _post_with_retry
+    from .qqbot_sender import config_problem, push_to_group
 
     key = (kind, title)
     suppressed = 0
@@ -141,9 +136,10 @@ def push_ops_alert(title: str, detail: str = "", kind: str = "ops") -> tuple[boo
     if not Config.ALERT_ON_OPS_FAILURE:
         record_local_alert(kind, title, detail, "disabled")
         return False, "运维告警已关闭（ALERT_ON_OPS_FAILURE=0）"
-    if not Config.NAPCAT_WEBHOOK or not Config.REPORT_GROUP_ID:
+    problem = config_problem(need_group=True)
+    if problem:
         # 没接机器人时只记日志，不报错——本地开发不该因为这条炸掉
-        logger.warning("运维告警未发送（未配置推送）：%s｜%s", title, detail)
+        logger.warning("运维告警未发送（%s）：%s｜%s", problem, title, detail)
         record_local_alert(kind, title, detail, "unconfigured")
         return False, "未配置推送通道"
 
@@ -172,11 +168,6 @@ def push_ops_alert(title: str, detail: str = "", kind: str = "ops") -> tuple[boo
         return False, f"同类告警 {OPS_ALERT_MIN_INTERVAL_S}s 内已发过，本次已抑制（第 {suppressed} 次）"
 
     content = f"【系统告警】{title}\n{detail}\n时间：{datetime.now():%m-%d %H:%M}"
-    group_id = Config.REPORT_GROUP_ID
-    payload = {
-        "group_id": int(group_id) if group_id.isdigit() else group_id,
-        "message": [{"type": "text", "data": {"text": content}}],
-    }
-    ok, message = _post_with_retry("send_group_msg", payload, "运维告警")
+    ok, message = push_to_group(content, description="运维告警")
     record_local_alert(kind, title, detail, "sent" if ok else f"failed:{message}"[:120])
     return ok, message

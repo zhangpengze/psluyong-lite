@@ -152,10 +152,16 @@ def _due_day(now: datetime | None = None) -> date:
 
 
 def _report_row() -> dict:
-    from .config import DATA_DIR, Config
+    from .config import DATA_DIR
 
-    if not Config.NAPCAT_WEBHOOK:
-        return {"status": STATUS_OFF, "detail": "推送通道未配置，日报只生成不推送"}
+    from bot.qqbot_sender import config_problem
+
+    # "没配"和"配了但推失败"必须分开显示：前者是灰点（管理员还没接机器人），
+    # 后者是红点（接了却推不出去，这才是事故）。只看推送状态文件的话，
+    # 没配推送的部署会永远显示"日报没有推送记录"，像是天天出故障。
+    problem = config_problem(need_group=True)
+    if problem:
+        return {"status": STATUS_OFF, "detail": f"推送通道未配置（{problem}），日报只生成不推送"}
     day = _due_day()
     status_file = DATA_DIR / "reports" / f"{day:%Y-%m-%d}.status.json"
     if not status_file.exists():

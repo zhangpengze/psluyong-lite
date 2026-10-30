@@ -61,9 +61,9 @@ README = """# psluyong-lite 服务端（NAS 部署版）
     QQ_BOT_SECRET=<q.qq.com 后台的 AppSecret>
     QQ_BOT_GROUP_OPENID=<群的 openid，不是群号>
 
-拿 `QQ_BOT_GROUP_OPENID`：把机器人拉进群，在群里 @ 它说一句话，服务端日志里
-`GROUP_AT_MESSAGE_CREATE` 事件带的 `group_openid` 就是它（也可以用
-`python scripts/qqbot_spike.py` 自动抓）。
+拿 `QQ_BOT_GROUP_OPENID`：服务端没有入站端点（@ 机器人不会进服务端日志），
+只能在开发机上跑 `python scripts/qqbot_spike.py` 自动抓——脚本不进 NAS 镜像。
+跑之前把开发机的出口公网 IP 加进机器人 IP 白名单（拿到 openid 后可删）。
 
 **必须做的两件事**（漏了就会一直 40034102 主动消息无权限）：
 1. 手机 QQ 打开该群 → 设置 → 机器人 → 打开「机器人主动在群聊内发言」；

@@ -373,12 +373,20 @@ QQ 开放平台的官方机器人，原因不是技术偏好：
 官方接口发群消息用的是 `group_openid`——一串只有从**事件**里才能拿到的字符串，
 把群号 `123456789` 填进去只会拿到 `40054002`。
 
-两种拿法，任选一种：
+**唯一拿法：跑探针脚本。** 官方机器人迁移后服务端没有任何入站端点（只出站
+推送），在群里 @ 机器人，事件不会出现在服务端日志里——老文档写的"看服务端
+日志"那条路已失效。脚本不在 NAS 镜像里（lean Dockerfile 明确开发探针不进
+镜像），在开发机上跑：
 
-- **手动**：机器人进群后，在群里 @ 它说一句话，服务端日志里
-  `GROUP_AT_MESSAGE_CREATE` 事件带的那串 `group_openid` 就是它；
-- **自动**：`python scripts/qqbot_spike.py`（脚本会连 WebSocket 抓第一条群事件，
-  并把建议写进 `.env` 的那一行直接打出来）。
+```bash
+# 开发机 .env 先填 AppID/Secret；白名单临时加上开发机的出口公网 IP
+# （可以加多条；只许一条就临时替换，拿到 openid 再换回 NAS 的）；
+# 然后在目标群里 @ 一下机器人，脚本收到事件就把 group_openid 打出来
+.venv/Scripts/python.exe scripts/qqbot_spike.py
+```
+
+已有 openid 后重跑可跳过监听：`--group-openid XXXX`；只验凭证不发消息：
+`--dry-run`。
 
 ### 3. 配置 .env
 

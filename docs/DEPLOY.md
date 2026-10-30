@@ -479,6 +479,10 @@ ALERT_MIN_INTERVAL_S=5   # 告警最小间隔：PS 故障批量失败不会把�
 **先跑脚本，再勾这个清单。** 下面这份是给"人"看的版本；其中凡是机器能判的，都做成了
 `scripts/preflight_check.py`，有 FAIL 就是退出码 1，可以直接挂在 CI 或部署前置闸门上：
 
+> 灰度当天（3 人灰度 → 全量）的放行条件、图片第二份的三层验收与证据包格式、
+> 全量前 5 项阻塞跟踪表，见 [GRAY-RELEASE-DAY.md](GRAY-RELEASE-DAY.md)——
+> 本清单是它的子集与底座。
+
 ```bash
 .venv/Scripts/python.exe scripts/preflight_check.py                              # 表格
 .venv/Scripts/python.exe scripts/preflight_check.py --base-url http://NAS:8080    # 顺带探就绪探针

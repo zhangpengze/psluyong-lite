@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,20 @@ def _tree(root: Path) -> None:
     _write(root / "2026" / "10" / "23" / "c.jpg", 300)
 
 
+def _bump_mtime(path: Path, delta_s: float = 60.0) -> None:
+    """显式把目录 mtime 推走，保证「目录内容变了」这个前提成立。
+
+    不能指望「刚建完目录就往里加文件」一定换来新的 mtime：文件系统时间戳有粒度
+    （本地 NTFS 实测约 3ms，200 次快速连续操作里有 3 次差值为 0；CI 的 Windows
+    runner 上必现），建目录与加文件落在同一时钟刻度内时目录 mtime 不变，缓存
+    就不会失效——那是文件系统的行为，不是我们要钉的逻辑。生产侧 mtime 没变时
+    由 5 分钟 TTL 兜底（见 dir_usage 模块 docstring），用例这里只验我们自己的
+    失效判据：mtime 一变就必须重扫、合计必须立刻对。
+    """
+    st = path.stat()
+    os.utime(path, (st.st_atime + delta_s, st.st_mtime + delta_s))
+
+
 def test_counts_every_file_and_byte(tmp_path):
     _tree(tmp_path)
 
@@ -76,7 +91,9 @@ def test_new_file_in_a_day_dir_is_noticed_immediately(tmp_path):
     _tree(tmp_path)
     du.dir_usage(tmp_path)
 
-    _write(tmp_path / "2026" / "10" / "24" / "d.jpg", 50)
+    day_dir = tmp_path / "2026" / "10" / "24"
+    _write(day_dir / "d.jpg", 50)
+    _bump_mtime(day_dir)
 
     assert du.dir_usage(tmp_path) == (4, 650)
 
@@ -86,7 +103,9 @@ def test_change_deep_down_updates_the_parent_total(tmp_path):
     _tree(tmp_path)
     du.dir_usage(tmp_path)
 
-    _write(tmp_path / "2026" / "10" / "23" / "e.jpg", 1000)
+    day_dir = tmp_path / "2026" / "10" / "23"
+    _write(day_dir / "e.jpg", 1000)
+    _bump_mtime(day_dir)
 
     assert du.dir_usage(tmp_path) == (4, 1600)
 
